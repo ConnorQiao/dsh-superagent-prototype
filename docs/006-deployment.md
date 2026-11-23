@@ -94,6 +94,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
+| `toolModules` | no | Absolute paths of modules that add tools to every Executor Session. Each exports `workerTools(context)`, which returns tools bound to the Session's ticket; `context.asker(triggerId)` names the person whose message the tool serves, and refuses a trigger that is not a person's message on that ticket. A module runs in the DeepSeek Harness process, outside the worker's sandbox. A change remounts the plugin |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 

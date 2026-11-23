@@ -9,20 +9,24 @@ import type { Store } from '../store.ts'
 import { reportRelay, threadFollowedNotice } from '../notices.ts'
 import type { Sessions } from '../sessions.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
+import { extensionTools, type WorkerToolModule } from './extensions.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'threads' | 'replyStatus' | 'atomic'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
+  /** Modules named in `toolModules`, whose tools join the Session's own (`extensions.ts`). */
+  readonly toolModules?: readonly WorkerToolModule[]
+  warn?(message: string): void
   sendReplies(): Promise<void>
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
   const ticketId = ticket.id
-  return [
+  const own: Tool[] = [
     readTool('Read one page of a resource of this ticket that the resource parameter lists. Follow next_offset, and next_resource where a page names one.',
       true, (resource, offset, limit, signal) => readResource(host.resources, resource, offset, limit, ticketId, signal)),
     tool({
@@ -102,4 +106,6 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       },
     }),
   ]
+  return [...own, ...extensionTools(host.toolModules ?? [], host.store, ticket, new Set(own.map(item => item.name)),
+    host.warn ?? (() => {}))]
 }
