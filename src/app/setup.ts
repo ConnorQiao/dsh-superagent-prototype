@@ -1,7 +1,7 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { SETUP_FIELDS, feishuConfigured, githubConfigured, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -76,14 +76,24 @@ export class Setup {
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
-    const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
-      if (!(error instanceof SetupError)) throw error
-      this.feishuProblem = error.problem
-      context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
-      return undefined
-    })
-    const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
+    const github = settings.sources.github?.config
+    const feishuConfig = settings.sources.feishu?.config
+    let resolved: Deployment
+    if (!githubConfigured(github) && feishuConfigured(feishuConfig)) {
+      // Feishu alone: without a repository the bot is the whole installation, so its problem is the setup problem.
+      const feishu = await resolveFeishuBot(machine, feishuConfig, probe)
+      if (!feishu) throw new SetupError('feishuCliFailed', { output: 'No bot CLI is configured' })
+      resolved = { ...machine, feishu }
+    } else {
+      const deployment = await resolveDeployment(machine, github, probe)
+      const feishu = await resolveFeishuBot(machine, feishuConfig, probe).catch((error: unknown) => {
+        if (!(error instanceof SetupError)) throw error
+        this.feishuProblem = error.problem
+        context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
+        return undefined
+      })
+      resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
+    }
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
