@@ -20,7 +20,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ## Prerequisites
 
-- Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
+- Node.js 24.22.3+ or 26.13.1+, as DeepSeek Harness 0.2.3 requires, pnpm, git 2.32+, Python 3.8+ and tmux
 - GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
@@ -73,7 +73,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 Run this block once, on a machine that has no `superagent` profile yet:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+npm install -g @deepseek-ai/dsh@0.2.3-alpha.2
 git clone <this repository> dsh-superagent && cd dsh-superagent
 pnpm install && pnpm build
 dsh superagent --from-default-profile web --dump-config > /dev/null
@@ -121,12 +121,12 @@ scripts/dsh-superagent status
 
 A Source that is still starting counts as normal operation. So does a Feishu bot that setup could not check.
 
-`status` returns failed parts and their details under `errors`, and setup requirements under `setup`. `start` and `restart` print those problems as lines; they exit 1 if the service never comes up. Only an intentional `stop` pauses automatic recovery.
+`status` returns failed parts and their details under `errors`, setup requirements under `setup`, and under `auth` why it could not sign in to DeepSeek Harness, which answers 401 to a request without its sign-in. The script signs in with the launch token the service prints in the log `start` wrote, as opening the printed URL does; a service started otherwise therefore reports `auth` until the script restarts it. `start` and `restart` print those problems as lines; they exit 1 if the service never comes up. Only an intentional `stop` pauses automatic recovery.
 
 Each profile stores logs and control files under `.artifacts/`:
 
 - Startup logs: `dsh-superagent-<profile>-<date>-<time>-<pid>.log`, where the pid belongs to the script. The newest 20 are kept.
-- Control files: `control/profiles/<profile>/`, containing the stop marker, lock and process id.
+- Control files: `control/profiles/<profile>/`, containing the stop marker, lock, process id and the path of the service's log.
 
 Open the URL printed in the log, then choose **Superagent** in the sidebar.
 
@@ -160,7 +160,9 @@ Setup must succeed before polling or work starts. Overview lists missing require
 
 The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
 
-Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
+`scripts/dsh-superagent api <METHOD> <path> [<body>]` sends one request, with the sign-in of the service script described under Start and stop, prints the answer and exits 0 on a 2xx answer. A body of `-` is read from standard input.
+
+A client of its own sends requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1` and the DeepSeek Harness sign-in: the cookie that `GET /?token=<launch token>` sets, which DeepSeek Harness answers 401 without. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
 
 API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
 
@@ -193,6 +195,7 @@ Health entries are grouped by responsibility:
 A refusal has a status and `error`, its English text:
 
 - 400: an invalid value (`issues`, each with its `path`), a failed account check (`setup`), a fixed refusal (`code` and `values`), or a body that is not JSON or is too large.
+- 401: no DeepSeek Harness sign-in, answered by DeepSeek Harness itself.
 - 404: something that does not exist.
 - 409: a stale revision.
 - 500: anything else.
@@ -207,10 +210,9 @@ The blocks:
 Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 
 ```sh
-api=http://127.0.0.1:3082/orchestrator/api
-rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
-curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
-  -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
+rev=$(scripts/dsh-superagent api GET settings | jq '.sources[] | select(.id == "github") | .revision')
+scripts/dsh-superagent api PUT settings/source:github \
+  "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
 ```
 
 ## Setup checks
@@ -263,6 +265,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `The bot lark-cli allows user identities` | Point the Feishu Source at a bot-only configuration, as in Feishu bot above |
 | `The bot lark-cli does not work.` or `The bot identity of app … is …` | Check the configuration's app id and secret |
 | `The Feishu bot is not a member of the chat.` | Add the bot to the chat in the chat's settings; the next attempt succeeds |
+| `status` reports `auth` | DeepSeek Harness requires its sign-in, and the log of the service's start by the script holds no launch token that signs in: the service was started outside the script, or its log is gone. Run `scripts/dsh-superagent restart` |
 | `status` exits 2 | A part reports an error, which a restart does not fix: `errors` names each part, as listed under Management API, with its detail; each part clears its own entry once it works again |
 | `status` exits 3 | Setup waits: `setup` says what is missing, and the overview links to the setting that fixes it |
 | `status` exits 1 | The service does not run, runs twice, does not answer, or its runtime reports an error; the output and the newest log say which |

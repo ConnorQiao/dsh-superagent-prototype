@@ -4,6 +4,10 @@
 `status`, `start`, and `restart` exit 0 while the service runs normally; 1 when it is stopped, duplicated, unreachable, or
 reporting a runtime error, which `restart` may fix; 2 when it runs while a component such as a Source reports an error;
 and 3 when it runs and waits for setup. A restart fixes neither 2 nor 3: they need a person.
+
+`api METHOD PATH [BODY]` sends one Management API request, as the panel does, and prints the answer; it exits 0 on a 2xx answer.
+DSH answers 401 to a request without its sign-in, so every request signs in with the launch token the service printed in the
+log `start` wrote for it.
 """
 
 import argparse
@@ -19,12 +23,15 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 ARTIFACTS = ROOT / '.artifacts'
 CONTROL = ARTIFACTS / 'control'
 KEEP_LOGS = 20
+# The entry URL DSH prints once it is ready, as `dsh web: http://127.0.0.1:3082/?token=…`.
+LAUNCH_TOKEN = re.compile(r'https?://\S+?[?&]token=([A-Za-z0-9_-]+)')
 
 
 def control(profile):
@@ -78,19 +85,80 @@ def processes(profile):
     return found + [pid] if pid not in found and running(pid, profile) else found
 
 
-def state(url):
-    """Fetch health and setup status from the management API, or return None if unreachable."""
-    request = urllib.request.Request(url.rstrip('/') + '/orchestrator/api/state',
-                                     headers={'x-orchestrator-request': '1'})
+class Unauthorized(RuntimeError):
+    """The service answers 401, and no launch token in the log of its start signs in."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Keep the sign-in answer, a redirect that carries the cookie, instead of following it."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def launch_token(profile):
+    """Return the newest launch token in the log `start` recorded for `profile`, or None."""
     try:
-        with urllib.request.urlopen(request, timeout=2) as response:
-            value = json.load(response)
+        text = Path((control(profile) / 'service.log').read_text().strip()).read_text(errors='replace')
+    except OSError:
+        return None
+    found = LAUNCH_TOKEN.findall(text)
+    return found[-1] if found else None
+
+
+def sign_in(url, token):
+    """Exchange the launch token for DSH's sign-in cookie of `url`'s host, as opening the printed URL does; None if refused."""
+    request = urllib.request.Request(url.rstrip('/') + '/?' + urllib.parse.urlencode({'token': token}))
+    try:
+        response = urllib.request.build_opener(_NoRedirect).open(request, timeout=2)
+    except urllib.error.HTTPError as error:
+        response = error
+    cookies = [header.split(';', 1)[0].strip() for header in response.headers.get_all('Set-Cookie') or []]
+    return '; '.join(cookie for cookie in cookies if cookie) or None
+
+
+SIGNED_IN = {}
+
+
+def call(url, profile, path, method='GET', body=None, timeout=2.0):
+    """Send one Management API request, signing in once DSH answers 401; return the status and the body of the answer."""
+    key = (url, profile)
+    for attempt in range(2):
+        headers = {'x-orchestrator-request': '1'}
+        if body is not None:
+            headers['content-type'] = 'application/json'
+        if key in SIGNED_IN:
+            headers['cookie'] = SIGNED_IN[key]
+        request = urllib.request.Request(url.rstrip('/') + '/orchestrator/api/' + path, data=body, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            if error.code != 401:
+                return error.code, error.read()
+        token = None if attempt else launch_token(profile)
+        cookie = token and sign_in(url, token)
+        if not cookie:
+            raise Unauthorized('dsh-superagent answers but requires the DSH sign-in, and the log of its start by this script holds '
+                               'no launch token that signs in: restart it with this script, or use the URL DSH printed.')
+        SIGNED_IN[key] = cookie
+
+
+def state(url, profile):
+    """Fetch health and setup status from the management API: None if nothing answers, an `auth` problem if the script cannot sign in."""
+    try:
+        code, body = call(url, profile, 'state')
+        if code != 200:
+            return None
+        value = json.loads(body)
         # Keys omitted by another version read as empty so the service is not mistaken for unreachable.
         health, setup = value.get('health') or {}, value.get('setup') or {}
         entries = {name: entry if isinstance(entry, dict) else {} for name, entry in health.items()}
         return {'health': {name: entry.get('state') for name, entry in entries.items()},
                 'errors': {name: str(entry.get('detail', '')) for name, entry in entries.items() if entry.get('state') == 'error'},
-                'setup': setup.get('problem'), 'feishu': setup.get('feishuProblem')}
+                'setup': setup.get('problem'), 'feishu': setup.get('feishuProblem'), 'auth': None}
+    except Unauthorized as error:
+        return {'health': {}, 'errors': {}, 'setup': None, 'feishu': None, 'auth': str(error)}
     except (OSError, ValueError, AttributeError):
         return None
 
@@ -121,12 +189,24 @@ def outcome(pids, current):
 
 def status(args):
     pids = processes(args.profile)
-    current = state(args.url) if pids else None
+    current = state(args.url, args.profile) if pids else None
     print(json.dumps({'pids': pids, 'cwd': str(ROOT), 'url': args.url,
                       'manually_stopped': stopped(args.profile), 'health': current and current['health'],
                       'errors': current and current['errors'], 'setup': current and current['setup'],
-                      'feishu': current and current['feishu']}, ensure_ascii=False, indent=2))
+                      'feishu': current and current['feishu'], 'auth': current and current['auth']}, ensure_ascii=False, indent=2))
     return outcome(pids, current)
+
+
+def api(args):
+    """Send one Management API request and print its answer; exit 0 on a 2xx answer."""
+    method, path, *rest = args.request
+    body = None
+    if rest:
+        body = (sys.stdin.read() if rest[0] == '-' else rest[0]).encode()
+    code, answer = call(args.url, args.profile, path.lstrip('/'), method.upper(), body, timeout=args.timeout)
+    text = answer.decode(errors='replace')
+    print(text, end='' if text.endswith('\n') else '\n')
+    return 0 if 200 <= code < 300 else 1
 
 
 def stop(args, intentional=True):
@@ -167,11 +247,13 @@ def start(args):
             raise RuntimeError('Both dsh and tmux must be on PATH.')
         exists = subprocess.run(['tmux', 'has-session', '-t', '=' + session],
                                 capture_output=True).returncode == 0
-        if state(args.url) is not None:
+        if state(args.url, args.profile) is not None:
             raise RuntimeError('An existing orchestrator answers at this URL; refusing duplicate startup.')
         stamp = time.strftime('%Y%m%d-%H%M%S')
         log = ARTIFACTS / f'dsh-superagent-{args.profile}-{stamp}-{os.getpid()}.log'
         log.touch()
+        # The service prints its launch token here, which requests to it sign in with.
+        (control(args.profile) / 'service.log').write_text(str(log) + '\n')
         prune_logs(args.profile)
         # `exec` replaces the shell so the pane PID printed by tmux is the DSH service process itself.
         command = ('umask 077; exec ' + shlex.join([dsh, '--profile', args.profile, '--no-open'])
@@ -189,7 +271,7 @@ def start(args):
     (control(args.profile) / 'manually-stopped').unlink(missing_ok=True)
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
-        current = state(args.url)
+        current = state(args.url, args.profile)
         if processes(args.profile) and runtime_up(current):
             code = status(args)
             if current['setup']:
@@ -208,12 +290,14 @@ def start(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status'])
+    parser.add_argument('action', choices=['start', 'stop', 'restart', 'status', 'api'])
+    parser.add_argument('request', nargs='*', metavar='METHOD PATH [BODY]',
+                        help='For api: the method, the path under /orchestrator/api/, and a JSON body or - to read it from standard input.')
     parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
                         help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
     parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
                         help='Health-check URL; override after changing the profile port.')
-    parser.add_argument('--timeout', type=float, default=60, help='Startup timeout in seconds.')
+    parser.add_argument('--timeout', type=float, default=60, help='Startup timeout, or how long api waits for its answer, in seconds.')
     parser.add_argument('--stop-timeout', type=float, default=300,
                         help='Graceful shutdown timeout in seconds; running Executor Sessions finish their step first.')
     parser.add_argument('--respect-stop', action='store_true',
@@ -223,7 +307,14 @@ def main():
         parser.error('--timeout and --stop-timeout must be positive')
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', args.profile):
         parser.error('--profile must be a DSH profile name')
+    if args.action == 'api' and not 2 <= len(args.request) <= 3:
+        parser.error('api takes METHOD PATH [BODY]')
+    if args.action != 'api' and args.request:
+        parser.error(args.action + ' takes no request')
     os.umask(0o077)
+    if args.action == 'api':
+        # A request is no control operation, so it does not wait for the lock: the panel's requests do not either.
+        return api(args)
     with (control(args.profile) / 'operation.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

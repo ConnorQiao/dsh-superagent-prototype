@@ -231,10 +231,13 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
   const table = routes(runtime)
   const disposers = [
-    ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
+    // A management request needs DSH's sign-in, as every route that can change the Host does: DSH answers 401 to one without it.
+    // The panel holds the sign-in of its page; `scripts/dsh-superagent` signs in with the launch token the service printed.
+    ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', auth: 'required', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
-      if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      const port = ctx.webServer.port
+      if (port === undefined || !sameOrigin(req, port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))

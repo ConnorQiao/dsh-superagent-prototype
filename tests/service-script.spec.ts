@@ -29,6 +29,7 @@ beforeEach(() => {
   mkdirSync(join(root, 'scripts')); mkdirSync(join(root, 'bin'))
   copyFileSync(join(import.meta.dirname, '..', 'scripts', 'dsh-superagent'), join(root, 'scripts', 'dsh-superagent'))
   processes()
+  requests = []
   program('ps', `list='${root}/ps.txt'; [ -f '${root}/launched' ] && [ -f '${root}/ps-started.txt' ] && list='${root}/ps-started.txt'
 want=; while [ $# -gt 0 ]; do [ "$1" = -p ] && want=$2; shift; done
 while IFS= read -r line; do
@@ -65,6 +66,39 @@ async function answering(state: unknown = READY, always = false): Promise<string
 }
 const status = async (profile: string, url = 'http://127.0.0.1:9') =>
   JSON.parse((await run('status', '--profile', profile, '--url', url)).stdout) as { pids: number[]; manually_stopped: boolean }
+let requests: { method: string; path: string; cookie?: string; type?: string; marker?: string; body: string }[] = []
+/**
+ * A mock of DSH since 0.2.3, which answers 401 to a request without its sign-in: `GET /?token=<launch token>` hands out the
+ * sign-in cookie, as opening the printed URL does. Until tmux launches the service nothing answers, unless always is true.
+ */
+async function signingIn(answer: (path: string, body: string) => [number, unknown] = () => [200, READY], always = false): Promise<string> {
+  server = createServer((request, response) => {
+    let body = ''
+    request.on('data', chunk => { body += String(chunk) })
+    request.on('end', () => {
+      if (!always && !existsSync(join(root, 'launched'))) { response.writeHead(503).end(); return }
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      requests.push({ method: request.method!, path: url.pathname, cookie: request.headers.cookie, type: request.headers['content-type'],
+        marker: request.headers['x-orchestrator-request'] as string | undefined, body })
+      if (url.pathname === '/' && url.searchParams.get('token') === 'launch-token') {
+        response.writeHead(303, { location: './', 'set-cookie': 'dsh-auth-1=signed; Path=/; HttpOnly; SameSite=Strict' }).end()
+        return
+      }
+      if (request.headers.cookie !== 'dsh-auth-1=signed') { response.writeHead(401).end('unauthorized'); return }
+      const [code, value] = answer(url.pathname.slice('/orchestrator/api/'.length), body)
+      response.writeHead(code, { 'content-type': 'application/json' }).end(JSON.stringify(value))
+    })
+  })
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+  return `http://127.0.0.1:${(server!.address() as AddressInfo).port}`
+}
+/** Write the line DSH prints once it is ready into a log that `start` recorded for the profile. */
+function printed(url: string, token = 'launch-token') {
+  mkdirSync(control('superagent'), { recursive: true })
+  const log = join(root, '.artifacts', 'dsh-superagent-superagent-20261122-000000-1.log')
+  writeFileSync(log, `dsh web: ${url}/?token=${token}\n`)
+  writeFileSync(join(control('superagent'), 'service.log'), `${log}\n`)
+}
 
 it('refuses to stop when two processes serve the profile, before it writes the stop marker', async () => {
   processes(service(sleeper()), `${sleeper()} node node /opt/dsh --profile=superagent`)
@@ -98,6 +132,8 @@ it('records the service PID at start, and still refuses a second instance the sc
   expect(tmux).toEqual(expect.arrayContaining(['-P', '-F', '#{pane_pid}', '-c', checkout]))
   const log = new RegExp(`>> '${checkout}/\\.artifacts/dsh-superagent-superagent-\\d{8}-\\d{6}-\\d+\\.log' 2>&1$`)
   expect(tmux.find(word => word.startsWith('umask 077; exec '))).toMatch(log)
+  expect(tmux.find(word => word.startsWith('umask 077; exec ')))
+    .toContain(`>> '${readFileSync(join(control('superagent'), 'service.log'), 'utf8').trim()}' 2>&1`)
   const second = sleeper()
   started(service(pid), `${second} node node /opt/dsh --profile superagent`)
   const again = await run('start', '--url', url, '--timeout', '10')
@@ -231,4 +267,61 @@ it('does not signal a process that took the recorded service PID, and keeps a st
   processes(service(sleeper(true)))
   expect(await run('stop', '--stop-timeout', '1')).toMatchObject({ code: 1, stderr: expect.stringContaining('Graceful stop timed out') })
   expect(existsSync(join(control('superagent'), 'manually-stopped'))).toBe(true)
+}, 20_000)
+it('signs in with the launch token the service printed when DSH requires its sign-in, and says so when nothing signs in', async () => {
+  processes(service(sleeper()))
+  const waiting = { health: { runtime: { state: 'paused', detail: '' } },
+    setup: { problem: { code: 'repositoryUnset', detail: 'The GitHub Source names no repository.' }, feishuProblem: null } }
+  const url = await signingIn(() => [200, waiting], true)
+  // The service answers, but no start by this script recorded a log to read its token from.
+  const unsigned = await run('status', '--url', url)
+  expect(unsigned.code).toBe(1)
+  expect(JSON.parse(unsigned.stdout)).toMatchObject({ auth: expect.stringContaining('requires the DSH sign-in') })
+  printed(url, 'stale-token')
+  expect(await run('status', '--url', url)).toMatchObject({ code: 1, stdout: expect.stringContaining('requires the DSH sign-in') })
+  printed(url)
+  const signed = await run('status', '--url', url)
+  expect(signed.code).toBe(3)
+  expect(JSON.parse(signed.stdout)).toMatchObject({ auth: null, setup: { code: 'repositoryUnset' } })
+  // It sent the state request again with the cookie the token got.
+  expect(requests.filter(request => request.path === '/orchestrator/api/state').at(-1)).toMatchObject({ cookie: 'dsh-auth-1=signed' })
+})
+it('starts a service that requires the DSH sign-in, with the launch token it prints to the log of its start', async () => {
+  const url = await signingIn()
+  const pid = sleeper()
+  writeFileSync(join(root, 'pane'), `${pid}\n`)
+  started(service(pid))
+  // The service prints its entry URL into the log the script recorded, as DSH does once it is ready.
+  program('tmux', `for a in "$@"; do printf '%s\\n' "$a"; done >> '${root}/tmux.log'; echo --- >> '${root}/tmux.log'\n`
+    + `case "$1" in has-session) exit 1;; new-*) touch '${root}/launched'; `
+    + `printf 'dsh web: ${url}/?token=launch-token\\n' >> "$(cat '${control('superagent')}/service.log')"; cat '${root}/pane';; esac`)
+  expect(await run('start', '--url', url, '--timeout', '10')).toMatchObject({ code: 0 })
+}, 20_000)
+it('refuses to start while a DSH that requires its sign-in answers at its URL', async () => {
+  const url = await signingIn(undefined, true)
+  expect(await run('start', '--url', url, '--timeout', '5'))
+    .toMatchObject({ code: 1, stderr: expect.stringContaining('An existing orchestrator answers at this URL') })
+}, 20_000)
+it('sends a Management API request signed in, prints the answer, and does not wait for the control lock', async () => {
+  const url = await signingIn((path, body) => path === 'settings/source:github' ? [409, { error: 'Stale revision' }] : [200, { path, body }], true)
+  printed(url)
+  const read = await run('api', 'GET', 'settings', '--url', url)
+  expect(read.code).toBe(0)
+  expect(JSON.parse(read.stdout)).toEqual({ path: 'settings', body: '' })
+  const saved = await run('api', 'PUT', 'settings/policy', '{"value":{},"revision":1}', '--url', url)
+  expect(JSON.parse(saved.stdout)).toEqual({ path: 'settings/policy', body: '{"value":{},"revision":1}' })
+  expect(requests.at(-1)).toMatchObject({ method: 'PUT', type: 'application/json', marker: '1', cookie: 'dsh-auth-1=signed' })
+  // A refusal prints its answer and exits 1; a request without its path is a usage error.
+  expect(await run('api', 'PUT', 'settings/source:github', '{}', '--url', url)).toMatchObject({ code: 1, stdout: expect.stringContaining('Stale revision') })
+  expect(await run('api', 'GET', '--url', url)).toMatchObject({ code: 2, stderr: expect.stringContaining('api takes METHOD PATH [BODY]') })
+  expect(await run('status', 'GET', '--url', url)).toMatchObject({ code: 2, stderr: expect.stringContaining('status takes no request') })
+  const held = join(root, 'held')
+  const holder = spawn('python3', ['-c', `import fcntl, pathlib, time
+lock = open(${JSON.stringify(join(control('superagent'), 'operation.lock'))}, 'a')
+fcntl.flock(lock, fcntl.LOCK_EX)
+pathlib.Path(${JSON.stringify(held)}).touch()
+time.sleep(30)`], { stdio: 'ignore' })
+  sleepers.push(holder)
+  while (!existsSync(held)) await new Promise(resolve => setTimeout(resolve, 50))
+  expect(await run('api', 'GET', 'state', '--url', url)).toMatchObject({ code: 0 })
 }, 20_000)
