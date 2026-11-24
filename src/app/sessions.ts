@@ -38,6 +38,13 @@ export interface SessionsHost {
   readonly mainHealth?: HealthEntry
   /** A DSH scheduled task's occurrence delivered to the main Session (`schedules.ts`): the runtime turns it into a trigger. */
   reminded?(text: string): void
+  /**
+   * The main Session's context was compacted and the Session is idle: the runtime moves the main Session to a new one that
+   * starts from `summary` (`Runtime.rotateMain`), so its history in memory and on disk does not grow without end.
+   */
+  rotate?(summary: string): void
+  /** Earlier main Sessions this one replaced, whose DSH scheduled tasks still name them; their occurrences go to this one. */
+  previousMasters?(): readonly string[]
   readonly masterId: string
   readonly lifetime: AbortSignal
   closing(): boolean
@@ -130,6 +137,10 @@ export class Sessions {
   private mainFailing = false
   /** What the main Session is doing (`agent/status`) since when, and the tool calls it is waiting on, by call id. */
   private readonly main = { status: 'idle', since: new Date().toISOString(), calls: new Map<string, { name: string; since: string }>() }
+  /** The summary of the main Session's latest finished compaction, which the next main Session starts from once it is idle. */
+  private carried: string | undefined
+  /** The Session the main Session is moving to (`ensureMain`), decorated as the main Session from its creation on. */
+  private incoming: string | undefined
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
@@ -153,6 +164,7 @@ export class Sessions {
       this.updateModelHealth()
       if (agent.id === this.host.masterId) {
         this.mainEvent(event)
+        this.compaction(event)
         const message = event.data as { source?: { kind?: unknown }; content?: { type?: unknown; text?: unknown }[] } | undefined
         if (event.type === 'user/message' && message?.source?.kind === 'schedule' && !this.host.closing()) {
           const text = message.content?.find(part => part.type === 'text')?.text
@@ -175,12 +187,61 @@ export class Sessions {
     ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
       if (agent.id === this.host.masterId) this.mainStatus(status)
+      if (agent.id === this.host.masterId && status === 'idle') this.rotateIfCompacted()
+    })
+    // A DSH scheduled task names the main Session it was created in: one an earlier main Session made goes to this one.
+    const schedules = ctx as unknown as { on(name: 'schedule/resolve-agent', listener: (sessionId: string, next: () => Promise<Agent>) => Promise<Agent>): () => void }
+    schedules.on('schedule/resolve-agent', async (sessionId, next) => {
+      if (sessionId === this.host.masterId || !this.host.previousMasters?.().includes(sessionId)) return next()
+      const current = await ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
+      return 'error' in current ? next() : current.agent
     })
     ctx.on('agent/error', ({ agent, error }) => {
       if (agent.id !== this.host.masterId || this.host.closing()) return
       this.mainFailing = true
       this.host.mainHealth?.set({ state: 'error', detail: `A turn of the main Session failed: ${errorChain(error)}`, at: new Date().toISOString() })
     })
+  }
+  /**
+   * Note a finished compaction of the main Session: DSH appends `compaction/summary`, then `compaction/end`, without an error
+   * when it succeeded. Its history keeps every event before it, so the runtime moves to a new main Session that starts from
+   * the summary once this one is idle (`rotateIfCompacted`).
+   */
+  private compaction(event: { type: string; data: unknown }): void {
+    const data = event.data as { summary?: unknown; error?: unknown } | undefined
+    if (event.type === 'compaction/summary' && typeof data?.summary === 'string' && data.summary.trim()) this.pendingSummary = data.summary
+    else if (event.type === 'compaction/end' && data?.error === undefined && this.pendingSummary !== undefined) {
+      this.carried = this.pendingSummary; this.pendingSummary = undefined
+      if (this.main.status === 'idle') this.rotateIfCompacted()
+    }
+  }
+  private pendingSummary: string | undefined
+  /** Hand the latest compaction's summary to the runtime to start a new main Session from, once. */
+  private rotateIfCompacted(): void {
+    const summary = this.carried
+    if (summary === undefined || this.host.closing() || !this.host.rotate) return
+    this.carried = undefined
+    this.host.rotate(summary)
+  }
+  /** Create or load the Session the main Session moves to, as the main Session (`Runtime.rotateMain`). */
+  async ensureMain(id: string, cwd: string): Promise<Agent> {
+    this.incoming = id
+    try { return await this.ensure(id, cwd, 'dsh-superagent orchestrator', 'orchestrator') } finally { this.incoming = undefined }
+  }
+  /** The main Session moved to a new one, which starts idle; what the old one was doing no longer describes it. */
+  mainMoved(): void {
+    Object.assign(this.main, { status: 'idle', since: new Date().toISOString() })
+    this.main.calls.clear()
+    this.mainFailing = false
+  }
+  /**
+   * Unload a Session's agent from memory through DSH's Session controller, which owns it; its history stays on disk and the
+   * next delivery or `ensure` loads it again. False when the Session is not loaded, not idle, or the controller cannot unload.
+   */
+  async unload(sessionId: string): Promise<boolean> {
+    const controller = this.ctx.sessionController as unknown as { releaseAgent?(id: SessionId): Promise<boolean> }
+    if (typeof controller.releaseAgent !== 'function') return false
+    return await controller.releaseAgent(sessionId as SessionId)
   }
   /**
    * The main Session's activity for `GET state`: idle or running since when, and the oldest tool call it is still waiting on.
@@ -313,7 +374,7 @@ export class Sessions {
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
     const host = this.host
-    const master = agent.id === host.masterId
+    const master = agent.id === host.masterId || agent.id === this.incoming
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }

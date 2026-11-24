@@ -202,6 +202,8 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
+`sweep`, once a minute, unloads the worker Sessions that sat idle for `workerUnloadMinutes` with nothing to do, through `Sessions.unload` (see [003 Execution](003-execution.md)). It looks at the Sessions it saw created or go idle (`idleSince`). A launch or a delivery for a Ticket waits for an unload of its Session that runs, then loads it again through `Sessions.ensure`.
+
 Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
 
 `install` subscribes to Session events; `dispose` unsubscribes. A turn end normally reports waiting, except after readiness or while human action is required. Errors report failed. At startup, `resume` reports interrupted Assignments through `assignmentInterrupted` and requeues pending launches that do not wait for a person, oldest Ticket first.
@@ -233,6 +235,8 @@ Validation inherits an omitted base from the saved override, drops removed parts
 ### Sessions
 
 `Sessions` (`src/app/sessions.ts`) manages DeepSeek Harness Sessions for both roles. `ensure` creates a Session with its role's model. `install` follows agent events and registers prompts, skills and tools for managed Sessions.
+
+`unload` releases a loaded Session through the Session controller, which owns it (`releaseAgent`, which ff-agent adds to DeepSeek Harness 0.2.3 with a patch), and answers false where the controller cannot. `install` also notes the main Session's finished compactions (`compaction/summary`, then `compaction/end` without an error) and, once the main Session is idle, asks the Runtime to move it (`rotate`). `Runtime.rotateMain` creates the next main Session (`ensureMain`, `-r<n>` after the id), gives it the summary as a notice, switches `master-id` and the Runtime's `masterId`, which every part reads when it needs it, asks the assessor again for each candidate the old one was shown and did not decide, and unloads the old one once it is idle. A `schedule/resolve-agent` listener sends the occurrences of a scheduled task that names an earlier main Session (`master-previous`) to the current one.
 
 `prompt` delivers once per request id. `relay` and `notify` enqueue main-Session messages handled by the `relay` and `notice` effects. `src/app/notices.ts` defines their content; `delivery` checks whether a message arrived.
 
@@ -426,6 +430,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/schedules.spec.ts` | Scheduled tasks: reading delivered occurrences, the schedule tool guard, and the trigger an occurrence becomes |
+| `tests/memory.spec.ts` | What stays in memory: an idle Executor Session unloaded and loaded again for its Ticket's next message, what keeps one loaded, and the main Session moving to a new one after a compaction, with the summary, the undecided candidates and the scheduled tasks of the old one |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
@@ -476,7 +481,7 @@ A generated column is computed from its row's JSON and is empty outside its set,
 | Schema | Current schema version |
 | Settings versions | `settings-revision`, `settings-version:<n>`, `settings-block-revision:<block>`; snapshots include origin, Policy version and affected Tickets |
 | Prompt versions | `prompt-revision`, `prompt-version:<n>` |
-| Main Session | `master-id` |
+| Main Session | `master-id`, and `master-previous`, the main Sessions it replaced, whose DeepSeek Harness scheduled tasks still name them |
 | Session prompt history | `session-prompts:<session id>` |
 | Source state | Read positions such as `github-cursor:<number>`, PR CI fingerprints and seen Feishu-topic messages; keys begin with the kind or `thread-` plus a Thread key |
 | Display names | `source-labels:<source id>` |

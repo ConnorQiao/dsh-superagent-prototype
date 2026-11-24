@@ -20,6 +20,8 @@ export const Config = s.object({
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  workerUnloadMinutes: s.number().min(LIMITS.workerUnloadMinutes.min).max(LIMITS.workerUnloadMinutes.max).step(1).default(10)
+    .description('Minutes an Executor Session stays loaded with nothing to do before it is unloaded from memory; it loads again from disk when its ticket gets work.').volatile(),
   toolModules: s.array(absolute('A module whose workerTools adds tools to every Executor Session, bound to its ticket.')).default([])
     .description('Modules that add tools to every Executor Session (docs/006-deployment.md); a change remounts the plugin.'),
 })
@@ -29,6 +31,8 @@ export interface Machine {
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
+  /** Minutes an idle Executor Session stays loaded before it is unloaded (`DshExecutor`'s sweep). */
+  workerUnloadMinutes: Volatile<number>
   /** Modules that add tools to every Executor Session, each bound to its ticket (`src/app/tools/extensions.ts`). */
   toolModules: readonly string[]
 }
@@ -42,8 +46,8 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, toolModules: config.toolModules ?? [] }
+  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, workerUnloadMinutes } = config
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, workerUnloadMinutes, toolModules: config.toolModules ?? [] }
 }
 
 export const GithubAccountsSchema = z.object({

@@ -8,4 +8,5 @@ export const LIMITS = {
   promptMaxChars: { min: 1000, max: 1_000_000 },
   admissionContextMaxPages: { min: 1, max: 100 },
   admissionContextTimeoutMs: { min: 1, max: 90_000 },
+  workerUnloadMinutes: { min: 1, max: 1440 },
 } as const

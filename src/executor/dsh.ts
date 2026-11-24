@@ -17,7 +17,7 @@ import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
-import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
+import { cancelled, collectJob, hasLiveSubagents, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
@@ -32,6 +32,8 @@ const TRANSIENT_TRIES = 3, TRANSIENT_BACKOFF_MS = 15_000
 const BACKGROUND_LIMIT_MS = 30 * 60_000
 /** How long a host stop waits for the workers' background work to stop. */
 const SHUTDOWN_STOP_MS = 10_000
+/** How often the sweep looks for worker Sessions that sat idle long enough to unload (`DshExecutor.sweep`). */
+const SWEEP_MS = 60_000
 /** How long a worker that goes on after a passing failure waits for a worker slot, or for processing to resume, between looks. */
 const SLOT_WAIT_MS = 5000
 /** True when an input comes from a person (a non-context human trigger or a direct text input such as a status request). */
@@ -67,10 +69,10 @@ export interface ExecutorHost {
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
-  readonly machine: Pick<Machine, 'stateDir'>
+  readonly machine: Pick<Machine, 'stateDir' | 'workerUnloadMinutes'>
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
-  readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
+  readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds' | 'unload'>
   closing(): boolean
   /** Whether processing is paused, which holds launches and input deliveries. */
   paused(): boolean
@@ -196,6 +198,8 @@ export class WorkerSlots {
   }
   /** Releases `ticketId`'s starting slot once its worker session is running or the launch/wake attempt has ended. */
   free(ticketId: string): void { this.starting.delete(ticketId) }
+  /** Whether a launch or a wake of `ticketId` holds a starting slot, which means it is about to use its worker Session. */
+  holds(ticketId: string): boolean { return this.starting.has(ticketId) }
 }
 
 /**
@@ -224,6 +228,13 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /** When each loaded worker Session last went idle, by Session id: the Sessions the sweep that unloads idle ones looks at. */
+  private readonly idleSince = new Map<string, number>()
+  /** Unloads of worker Sessions that run, by ticket, which a launch or a delivery of the ticket waits for. */
+  private readonly unloading = new Map<string, Promise<void>>()
+  /** The timer of the sweep that unloads idle worker Sessions, which dispose clears. */
+  private sweeper?: ReturnType<typeof setInterval>
+  private sweeping = false
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -290,6 +301,8 @@ export class DshExecutor implements Executor {
   private async deliverQueued(ticketId: string): Promise<void> {
     // A stop of the worker's background work ends with a cancel, which would drop what is delivered meanwhile.
     await this.stopped(ticketId)
+    // A Session being unloaded loads again for this delivery once the unload is done.
+    await this.unloaded(ticketId)
     const first = this.host.store.tickets.get(ticketId)
     const target = first && liveTicket(first) ? runningAssignment(first) : undefined
     if (!first || !target || !first.undelivered.length) return
@@ -438,6 +451,8 @@ export class DshExecutor implements Executor {
     }
     if (!current()) return
     const sessionId = workerSessionId(ticket.id)
+    await this.unloaded(ticket.id)
+    if (!current()) return
     const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker')
     if (!current()) return
     // The background work of the Assignment this one replaces stops first, so its end does not clear this one's message.
@@ -477,6 +492,10 @@ export class DshExecutor implements Executor {
   install(): void {
     const ctx = this.host.context
     this.disposers.push(ctx.on('agent/status', ({ agent, status }) => {
+      if (ticketOfSession(agent.id) !== undefined) {
+        if (status !== 'idle') this.idleSince.delete(agent.id)
+        else if (!this.idleSince.has(agent.id)) this.idleSince.set(agent.id, Date.now())
+      }
       // A turn that starts ends the look at its worker's background work; the turn's own idle looks afresh.
       if (status === 'running') { this.settling.get(ticketOfSession(agent.id) ?? '')?.abort(); return }
       // The turn a stop of the worker's subagents woke and cancelled is no turn of the worker's.
@@ -485,6 +504,15 @@ export class DshExecutor implements Executor {
       const assignment = ticket && runningAssignment(ticket)
       if (ticket && assignment && liveTicket(ticket)) void this.background(this.workerIdle(ticket, assignment, agent))
     }))
+    this.disposers.push(ctx.on('agent/created', ({ agent }) => {
+      if (ticketOfSession(agent.id) !== undefined && agent.status === 'idle' && !this.idleSince.has(agent.id)) this.idleSince.set(agent.id, Date.now())
+      return undefined
+    }))
+    this.disposers.push(ctx.on('agent/disposed', ({ agent }) => { this.idleSince.delete(agent.id) }))
+    const sweeper = this.sweeper = setInterval(() => {
+      this.sweep().catch((error: unknown) => { ctx.logger.warn('dsh-superagent could not unload idle worker Sessions: %s', String(error)) })
+    }, SWEEP_MS)
+    sweeper.unref?.()
     // A person's message typed into a worker's Session, which the ticket does not record.
     this.disposers.push(ctx.on('agent/inbox/claimed', ({ agent, message }) => {
       const ticketId = ticketOfSession(agent.id)
@@ -515,6 +543,52 @@ export class DshExecutor implements Executor {
     for (const dispose of this.disposers.splice(0)) dispose()
     for (const timer of this.timers) clearTimeout(timer)
     this.timers.clear()
+    if (this.sweeper) clearInterval(this.sweeper)
+    this.sweeper = undefined
+  }
+  /**
+   * Unload the worker Sessions that sat idle for `workerUnloadMinutes` with nothing to do. A loaded Session keeps its whole
+   * history in memory until the host stops, so without this every ticket that ran since then stays in memory; an unloaded
+   * one loads again from disk when its ticket gets work (`launch`, `deliverQueued`), with its history, model and permissions.
+   */
+  async sweep(at = Date.now()): Promise<void> {
+    if (this.host.closing() || this.sweeping) return
+    this.sweeping = true
+    try {
+      const limit = this.host.machine.workerUnloadMinutes.get() * 60_000
+      for (const [sessionId, since] of [...this.idleSince]) {
+        if (this.host.closing()) return
+        const ticketId = ticketOfSession(sessionId), agent = this.host.context.agents.get(sessionId as SessionId)
+        if (ticketId === undefined || agent === undefined || agent.status !== 'idle') { this.idleSince.delete(sessionId); continue }
+        if (at - since < limit || !this.unloadable(ticketId, agent)) continue
+        // A subagent at work holds its parent; what the wait for the catalog let in is checked again.
+        if (await hasLiveSubagents(this.host.context, sessionId) || agent.status !== 'idle' || !this.unloadable(ticketId, agent)) continue
+        await this.unload(ticketId, agent)
+      }
+    } finally { this.sweeping = false }
+  }
+  /**
+   * Whether nothing holds an idle worker Session: no delivery or launch on its way to it, no stop of its background work,
+   * no shell job or subagent of its, including jobs it left to a person, and no message waiting in its inbox.
+   */
+  private unloadable(ticketId: string, agent: Agent): boolean {
+    const ticket = this.host.store.tickets.get(ticketId)
+    if (ticket && liveTicket(ticket) && (ticket.undelivered.length > 0 || latestAssignment(ticket)?.state === 'pending')) return false
+    if (this.settling.has(ticketId) || this.stopping.has(ticketId) || this.left.has(ticketId) || this.slots.holds(ticketId)) return false
+    if (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) return false
+    return runningJobs(this.host.context, agent.id).length === 0
+  }
+  /** Unload one worker Session, which a launch or a delivery of its ticket waits for meanwhile. */
+  private async unload(ticketId: string, agent: Agent): Promise<void> {
+    const unload: Promise<void> = this.host.sessions.unload(agent.id).then(done => { if (done) this.idleSince.delete(agent.id) })
+      .finally(() => { if (this.unloading.get(ticketId) === unload) this.unloading.delete(ticketId) })
+    this.unloading.set(ticketId, unload)
+    await unload
+  }
+  /** Wait for an unload of the ticket's worker Session that runs, unless the host stops first. */
+  private async unloaded(ticketId: string): Promise<void> {
+    const unloading = this.unloading.get(ticketId)
+    if (unloading) await until(unloading.catch(() => {}), this.host.lifetime)
   }
   /**
    * Reconciles running and pending assignments across open tickets after a host restart: notifies Engine of interrupted

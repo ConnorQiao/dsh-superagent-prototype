@@ -152,6 +152,13 @@ export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = fals
   }
 }
 
+/** Whether a Session has a subagent that is loaded, which works for it or waits to. */
+export async function hasLiveSubagents(ctx: Context, sessionId: string): Promise<boolean> {
+  const subagents = subagentsOf(ctx)
+  if (!subagents) return false
+  return (await subagents.listChildren(sessionId)).some(child => ctx.agents.get(child.id as SessionId) !== undefined)
+}
+
 /**
  * Stop what a worker runs in the background once its Assignment ends: kill its shell jobs and release its subagents (see
  * `stopSubagents`). A Session not loaded has no subagent at work. One failure stops nothing else.

@@ -9,7 +9,7 @@ export const reference = <T>(value: T): Volatile<T> & { set(next: T): void } => 
 }
 export const testMachine = (overrides: Partial<Machine> = {}): Machine => ({
   stateDir: '/tmp/dsh-superagent-test', promptMaxChars: reference(100000), admissionContextMaxPages: reference(10),
-  admissionContextTimeoutMs: reference(15000), toolModules: [], ...overrides,
+  admissionContextTimeoutMs: reference(15000), workerUnloadMinutes: reference(10), toolModules: [], ...overrides,
 })
 /** A GitHub installation (with Feishu) unless a test overrides the parts; the GitHub parts are typed as present. */
 type GithubDeployment = Deployment & { repository: string; github: NonNullable<Deployment['github']> }

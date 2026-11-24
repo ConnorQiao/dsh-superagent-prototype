@@ -28,6 +28,12 @@ Executor Sessions run commands without approval as the operator's OS user. Their
 
 The main Session uses `dsh-superagent-router`, with the same 5-second shell and job-wait limits and a smaller tool set for routing. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
 
+### Loaded Sessions
+
+A loaded Session keeps its whole history in memory. An Executor Session that sat idle for `workerUnloadMinutes` (10 by default) with nothing to do is therefore unloaded: no turn of it runs, no shell job or subagent of its works, no message waits in its inbox, and no delivery, launch or stop of its background work is on its way. Its history stays on disk, and the next launch or delivery for its Ticket loads it again with its history, model and permissions. A sweep looks once a minute.
+
+The main Session's history grows with every candidate. After DeepSeek Harness compacted its context, the main Session moves to a new one once it is idle: the new Session starts from the summary of that compaction, and takes over the candidates the old one was shown and did not decide. Tickets, Threads and settings stay in the store; DeepSeek Harness scheduled tasks that name the old main Session reach the new one. The old Session is unloaded, and its files stay.
+
 ### Background work and worker slots
 
 When a turn ends with shell jobs or subagents still running, the Ticket keeps its worker slot and stays working. It is not reported as waiting, and the main Session receives no waiting report. A completed job or subagent wakes the Executor with its result in the same slot. Once a turn ends with no background work, the Executor reports waiting normally.

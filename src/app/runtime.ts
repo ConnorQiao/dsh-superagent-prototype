@@ -52,6 +52,19 @@ import { loadToolModules, type WorkerToolModule } from './tools/extensions.ts'
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
 const now = (): string => new Date().toISOString()
+/** How many earlier main Sessions the store remembers, for the DSH scheduled tasks that still name them. */
+const PREVIOUS_MASTERS = 20
+/** The id of the main Session that follows `id`: `-r<n>` counts the moves after a compaction (`Runtime.rotateMain`). */
+export function nextMasterId(id: string): string {
+  const moved = /^(.*)-r(\d+)$/.exec(id)
+  return moved ? `${moved[1]}-r${Number(moved[2]) + 1}` : `${id}-r1`
+}
+/** What a new main Session is told of the one it replaces: the summary of its compacted context, and where the rest is. */
+export function carriedContext(summary: string): string {
+  return ['This main Session continues an earlier one, whose context was compacted; the summary of that context follows.',
+    'Tickets, threads, triggers and decisions are in the store: read them with orchestrator_read instead of trusting the summary for them.',
+    '', summary.trim()].join('\n')
+}
 
 /**
  * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.
@@ -75,7 +88,11 @@ export class Runtime extends Service implements SourceHost {
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
-  readonly masterId: string
+  /** The main Session's id; it changes when the main Session moves to a new one after a compaction (`rotateMain`). */
+  private master!: string
+  get masterId(): string { return this.master }
+  /** Whether a move of the main Session runs (`rotateMain`). */
+  private rotating = false
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
@@ -105,8 +122,8 @@ export class Runtime extends Service implements SourceHost {
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
-      const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
-      store.set(KV.runtime.masterId, masterId)
+      this.master = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
+      store.set(KV.runtime.masterId, this.master)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
       const effects = this.effects = new Effects(store, board)
@@ -119,12 +136,14 @@ export class Runtime extends Service implements SourceHost {
       const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
-      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
+      const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, get masterId() { return runtime.masterId }, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'),
-        mainHealth: board.claim('main-session', { state: 'ready', detail: 'No turn of the main Session has failed' }), masterId,
+        mainHealth: board.claim('main-session', { state: 'ready', detail: 'No turn of the main Session has failed' }),
+        get masterId() { return runtime.masterId },
         reminded: text => { this.reminded(text) },
+        rotate: summary => { void this.rotateMain(summary) }, previousMasters: () => this.previousMasters(),
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
@@ -136,7 +155,7 @@ export class Runtime extends Service implements SourceHost {
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
-        deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
+        deliver: (id, text) => sessions.prompt(runtime.masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
@@ -217,6 +236,47 @@ export class Runtime extends Service implements SourceHost {
       }
     }
   }
+  /** The earlier main Sessions this one replaced, oldest first (`rotateMain`). */
+  previousMasters(): string[] { return this.store.get(KV.runtime.previousMasters) ?? [] }
+  /**
+   * Move the main Session to a new one that starts from `summary`, its latest compaction. DSH keeps every event of a Session
+   * in its history, compaction or not: in memory while it is loaded, which for the main Session is always, and on disk, so the
+   * main Session would grow without end. The new Session gets the summary as a notice and the candidates the old one saw
+   * without deciding them; tickets, threads and settings stay in the store, and DSH scheduled tasks that name the old Session
+   * reach the new one (`schedule/resolve-agent` in Sessions). The old Session is unloaded once it is idle; its files stay.
+   */
+  async rotateMain(summary: string): Promise<void> {
+    if (this.closing() || this.rotating) return
+    this.rotating = true
+    const from = this.master
+    try {
+      const to = nextMasterId(from)
+      await this.sessions.ensureMain(to, this.machine.stateDir)
+      if (this.closing()) return
+      await this.sessions.prompt(to, `carried:${from}`, carriedContext(summary), { inject: 'Context of the earlier main Session' })
+      if (this.closing()) return
+      this.store.atomic(() => {
+        this.store.set(KV.runtime.previousMasters, [...this.previousMasters().filter(id => id !== from), from].slice(-PREVIOUS_MASTERS))
+        this.store.set(KV.runtime.masterId, to)
+      })
+      this.master = to
+      this.sessions.mainMoved()
+      this.ctx.logger.info('dsh-superagent: the main Session moved from %s to %s after its context was compacted', from, to)
+      // What the old main Session was shown and did not decide goes to the new one; its deadline counts from that delivery.
+      for (const thread of this.store.threads.active()) {
+        const primary = thread.evaluating?.delivered ? thread.evaluating.primary : undefined
+        const candidate = primary ? this.engine.candidate(primary) : undefined
+        if (candidate) this.assessor.request(candidate)
+      }
+      const old = this.ctx.agents.get(from as SessionId)
+      if (old) {
+        await old.whenIdle()
+        if (!this.closing() && !await this.sessions.unload(from)) this.ctx.logger.warn('dsh-superagent: the old main Session %s stays loaded', from)
+      }
+    } catch (error) {
+      this.ctx.logger.warn('dsh-superagent: the main Session could not move to a new one: %s', String(error))
+    } finally { this.rotating = false }
+  }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
@@ -244,8 +304,9 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, ready, sourceLinks, setup, passes } = this
+    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, ready, sourceLinks,
+      get masterId() { return runtime.masterId },
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),

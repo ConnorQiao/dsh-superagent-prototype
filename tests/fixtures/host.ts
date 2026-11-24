@@ -231,6 +231,14 @@ export async function startRuntime(seed?: (store: Store) => void) {
         whenIdle: () => status === 'idle' ? Promise.resolve() : new Promise<void>(resolve => { idle.push(resolve) }) } as never)
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(resolveDefault), rename: vi.fn(async () => {}),
+    // As ff-agent's patch of DSH's Session controller: an idle loaded Session is unloaded; its history would load again.
+    releaseAgent: vi.fn(async (sessionId: string) => {
+      const agent = agents.get(sessionId)
+      if (!agent || agent.status !== 'idle') return false
+      agents.delete(sessionId)
+      ctx.emit('agent/disposed', { agent } as never)
+      return true
+    }),
     prompt: vi.fn(() => { throw new Error('Plugin delivery must not use user RPC') }),
     events: vi.fn(async () => ({ cursor: -1, records: [], hasMore: false })),
   }
