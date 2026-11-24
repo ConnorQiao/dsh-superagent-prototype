@@ -13,6 +13,7 @@ import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
+import { SCHEDULE_TOOLS, scheduleGuard } from './schedules.ts'
 import { initializeRoleModel, resolveRoleModel } from './role-models.ts'
 import type { RoleModel } from '../policy.ts'
 import { bundledSkills } from './skill-files.ts'
@@ -25,7 +26,7 @@ import type { RegisterTool, Tool } from './tools/tool.ts'
 export interface SessionsHost {
   /** DSH Cordis context: sessions, agents, persistence, and their events. */
   readonly context: Context
-  readonly store: Pick<Store, 'tickets' | 'settings' | 'get' | 'set' | 'keys'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'settings' | 'get' | 'set' | 'keys'>
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'compose' | 'skills'>
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
@@ -35,6 +36,8 @@ export interface SessionsHost {
    * A main Session whose turns keep failing judges nothing and answers no one, which nothing else reports.
    */
   readonly mainHealth?: HealthEntry
+  /** A DSH scheduled task's occurrence delivered to the main Session (`schedules.ts`): the runtime turns it into a trigger. */
+  reminded?(text: string): void
   readonly masterId: string
   readonly lifetime: AbortSignal
   closing(): boolean
@@ -82,11 +85,11 @@ declare module '@deepseek-ai/cordis' {
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
 /**
- * The DSH tools the main Session uses: skills, the shell and its jobs, reading files and images, and web_fetch for a quick
- * lookup. It keeps those it has (DSH refuses a restriction that names a tool the Session lacks); superagent's own tools and the
- * tool modules' `mainTools` are not masked.
+ * The DSH tools the main Session uses: skills, the shell and its jobs, reading files and images, web_fetch for a quick lookup,
+ * and DSH's scheduled tasks (`schedules.ts`). It keeps those it has (DSH refuses a restriction that names a tool the Session
+ * lacks); superagent's own tools and the tool modules' `mainTools` are not masked.
  */
-const MAIN_TOOLS = ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill', 'web_fetch']
+const MAIN_TOOLS = ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill', 'web_fetch', ...SCHEDULE_TOOLS]
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -148,7 +151,14 @@ export class Sessions {
       if (!agent || !binding || binding.subagent) return
       this.retryHealth.observe(agent.id, event)
       this.updateModelHealth()
-      if (agent.id === this.host.masterId) this.mainEvent(event)
+      if (agent.id === this.host.masterId) {
+        this.mainEvent(event)
+        const message = event.data as { source?: { kind?: unknown }; content?: { type?: unknown; text?: unknown }[] } | undefined
+        if (event.type === 'user/message' && message?.source?.kind === 'schedule' && !this.host.closing()) {
+          const text = message.content?.find(part => part.type === 'text')?.text
+          if (typeof text === 'string') this.host.reminded?.(text)
+        }
+      }
     })
     ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
     // Opening a Session in DSH's Web UI before its first turn may select the default preset for it: select ours again. After
@@ -333,7 +343,7 @@ export class Sessions {
     if (master) {
       const parent = scopeParentOf(agent)
       binding.disposers.push(agent.ctx.tools.restrict({ allow: MAIN_TOOLS.filter(name => agent.ctx.tools.get(name, parent)) }),
-        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
+        agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent)) ?? scheduleGuard(execution, host.store.triggers)))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))

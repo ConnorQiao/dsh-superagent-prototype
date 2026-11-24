@@ -165,7 +165,7 @@ beforeEach(async () => {
       const agentCtx = new Context()
       const preset = {}
       const inherited = ['bash', 'read', 'read_image', 'skill', 'job_output', 'job_list', 'job_kill', 'grep', 'web_fetch',
-        'ask_user_question', 'plugin_manager', 'schedule_create', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit']
+        'ask_user_question', 'plugin_manager', 'schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit', 'create_goal', 'session_create', 'session_send_message', 'feishu_doc_edit']
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       agentCtx.reflect.provide('tools', { register: (tool: RegisteredTool) => { sessionTools.set(tool.name,
@@ -1513,6 +1513,31 @@ it('fails a ticket at once on a worker error that is not passing, and relays it'
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
 })
 
+it('turns a DSH scheduled task\'s occurrence in the main Session into the requester\'s trigger on the request\'s thread, once', async () => {
+  const ask = feishu('41', '@bot 每天九点提醒我交日报')
+  await receive(ask)
+  // The main Session set the task up and answered: the request is settled when its first occurrence comes.
+  await route({ kind: 'ignore', trigger_id: ask.id, reason: 'Scheduled the reminder and answered' })
+  const ctx = (runtime as unknown as { ctx: Context }).ctx
+  const master = agents.get(runtime.masterId)! as unknown as { session: unknown }
+  const reminder = ['[SCHEDULE REMINDER]', 'This is a scheduled message from the user', 'schedule_id_json: "sch_1"',
+    'occurrence_at: 2026-11-25T01:00:00.000Z', `reminder_prompt_json: ${JSON.stringify(`trigger_id: ${ask.id}\n提醒我交日报`)}`].join('\n')
+  const deliver = () => ctx.emit('session/event', master.session as never, { type: 'user/message', seq: 1, time: Date.now(),
+    data: { id: 'm1', role: 'user', content: [{ type: 'text', text: reminder }], source: { kind: 'schedule' } } } as never)
+  deliver()
+  await runtime.idle()
+  const scheduled = runtime.store.triggers.get('schedule:sch_1:2026-11-25T01:00:00.000Z')!
+  expect(scheduled).toMatchObject({ source: 'feishu', actor: ask.actor, threads: ask.threads, human: true, text: '[定时提醒] 提醒我交日报',
+    meta: expect.objectContaining({ messageId: 'om_41', scheduledFrom: ask.id }) })
+  expect(relays(runtime.masterId).some(item => item.trigger_id === scheduled.id)).toBe(true)
+  // A repeated delivery (DSH may deliver again after a crash) is the same trigger.
+  const before = relays(runtime.masterId).length
+  deliver()
+  await runtime.idle()
+  expect(relays(runtime.masterId).filter(item => item.trigger_id === scheduled.id)).toHaveLength(1)
+  expect(relays(runtime.masterId).length).toBe(before)
+})
+
 it('reports a failed turn of the main Session in health and the overview until a later turn ends without failing', async () => {
   const ctx = (runtime as unknown as { ctx: Context }).ctx
   const master = agents.get(runtime.masterId)!
@@ -1618,7 +1643,8 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(guards.get(sessionId)!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
-  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill', 'web_fetch'] }])
+  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill', 'web_fetch',
+    'schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit'] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_fetch', 'skill'] }])

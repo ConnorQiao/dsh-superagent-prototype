@@ -121,9 +121,9 @@
               search: false
               fetch: true
     # The agent preset of the main Session (ROUTER_PRESET in src/app/sessions.ts). The worker's 5-second shell and job waits, so a command or a wait does not hold back the next candidates, and
-    # only what the main Session uses, with web_fetch so it can answer a quick lookup itself: no subagents, DSH's own web search,
-    # file search or writes, todo list, questions to a person, presenting, plan mode, plugin manager, scheduling, goals or
-    # workflows. No persona: the main Session's prompt is complete, so it has
+    # only what the main Session uses, with web_fetch so it can answer a quick lookup itself and DSH's scheduled tasks: no
+    # subagents, DSH's own web search, file search or writes, todo list, questions to a person, presenting, plan mode, plugin
+    # manager, goals or workflows. No persona: the main Session's prompt is complete, so it has
     # no other section.
     - id: dsh-superagent-router-preset
       name: '@deepseek-ai/dsh-agent-preset'
@@ -182,6 +182,9 @@
             config:
               search: false
               fetch: true
+          # DSH's scheduled tasks, delivered to the main Session and turned into the requester's triggers (src/app/schedules.ts).
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
           - id: compaction
             name: cordis:group
             group: true

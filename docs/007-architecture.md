@@ -332,6 +332,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/sessions.ts` | Sessions |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
+| `src/app/schedules.ts` | DSH scheduled tasks for the main Session: the guard on its schedule tools, and the trigger each delivered occurrence becomes |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
 | `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
@@ -424,6 +425,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
+| `tests/schedules.spec.ts` | Scheduled tasks: reading delivered occurrences, the schedule tool guard, and the trigger an occurrence becomes |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
@@ -513,6 +515,8 @@ The main Session also has DeepSeek Harness's `skill`, `bash`, `read`, `read_imag
 New main Sessions use `dsh-superagent-router` (`ROUTER_PRESET`). Shell commands and job waits return after 5 seconds. If the Web UI selects another preset before the first turn, `Sessions` restores this preset, or `WORKER_PRESET` for a worker.
 
 The `noWait` guard in `src/app/sessions.ts` refuses main-Session shell commands that invoke `sleep` at a command position, shell `timeoutMs` above 30 seconds, and `job_output` waits above 5 seconds. Reports and job results arrive automatically, so waiting only delays incoming candidates.
+
+The main Session also has DSH's scheduled tasks (`schedule_create`, `schedule_list`, `schedule_view`, `schedule_edit`). DSH delivers each due occurrence into the task's target Session as a scheduled message without a trigger, which the main Session could neither answer nor route. `scheduleGuard` in `src/app/schedules.ts` therefore accepts a task only when it targets the main Session and its prompt starts with the `trigger_id` of the person's request it serves; when an occurrence is delivered, the runtime turns it into a trigger from that person on that request's threads (`schedule:<id>:<occurrence>`, so a repeated delivery is the same trigger), assessed and routed like any request.
 
 Existing main Sessions on `standard` also need explicit timeouts for foreground commands and job waits; otherwise that preset's defaults hold the step for 60 and 30 seconds respectively. The host determines the current preset through `presetForSession`, falls back to the Session projection or header, and assumes `standard` if it cannot read the value.
 

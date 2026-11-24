@@ -41,6 +41,7 @@ import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions } from './sessions.ts'
+import { parseReminders, scheduledTrigger, taskOf } from './schedules.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
@@ -123,6 +124,7 @@ export class Runtime extends Service implements SourceHost {
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'),
         mainHealth: board.claim('main-session', { state: 'ready', detail: 'No turn of the main Session has failed' }), masterId,
+        reminded: text => { this.reminded(text) },
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
@@ -198,6 +200,23 @@ export class Runtime extends Service implements SourceHost {
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
+  /**
+   * A DSH scheduled task's occurrence reached the main Session: each one becomes a trigger from the person whose request
+   * created the task, on that request's threads (`schedules.ts`). A task whose request this host no longer knows is skipped.
+   */
+  private reminded(text: string): void {
+    for (const reminder of parseReminders(text)) {
+      const { triggerId, instruction } = taskOf(reminder.prompt)
+      const origin = triggerId ? this.store.triggers.get(triggerId) : undefined
+      if (!origin?.human || !instruction) {
+        this.ctx.logger.warn('dsh-superagent: scheduled task %s names no request this host knows; skipped', reminder.scheduleId)
+        continue
+      }
+      try { this.receive(scheduledTrigger(origin, reminder, instruction, new Date().toISOString())) } catch (error) {
+        this.ctx.logger.warn('dsh-superagent: scheduled task %s was not received: %s', reminder.scheduleId, String(error))
+      }
+    }
+  }
   idle(): Promise<void> { return this.passes.idle() }
   pump(): Promise<void> { return this.passes.pump() }
   sendReplies(): Promise<void> { return this.outbox.sent() }
