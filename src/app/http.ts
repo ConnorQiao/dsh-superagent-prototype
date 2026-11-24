@@ -37,7 +37,9 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery' | 'mainActivity'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount'>
+  readonly executor: Pick<DshExecutor, 'activeCount' | 'loadedCount'>
+  /** The main Sessions this one replaced after compactions (`Runtime.rotateMain`). */
+  previousMasters(): readonly string[]
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -104,9 +106,11 @@ function setupView(runtime: HttpHost) {
 /** Build the `/orchestrator/api/state` response consumed by the management panel and `scripts/dsh-superagent status` (`docs/006-deployment.md`). */
 export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
+  // DSH does not print its plugins' log, so what stays in memory shows here: worker Sessions loaded now, main Sessions replaced.
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
-    maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, main: runtime.sessions.mainActivity(), paused: settings.paused, health: runtime.health }
+    maxWorkers: settings.executor.maxWorkers, loaded: runtime.executor.loadedCount() },
+    masterId: runtime.masterId, replacedMasters: runtime.previousMasters().length, main: runtime.sessions.mainActivity(), paused: settings.paused,
+    health: runtime.health }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,

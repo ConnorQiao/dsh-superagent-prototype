@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { expect, it, vi } from 'vitest'
-import { stopSubagents, untilQuiet } from '../src/executor/background.ts'
+import { hasLiveSubagents, releaseSubagentTree, stopSubagents, untilQuiet } from '../src/executor/background.ts'
 import { jobRegistry } from './fixtures/host.ts'
 
 /** A context with DSH's job registry and subagents, and an idle worker agent with one live subagent, `child-1`. */
@@ -74,4 +74,51 @@ it('gives up a release of subagents that does not end within 10 seconds, and can
     await stopping
   } finally { vi.useRealTimers() }
   expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+})
+
+/** DSH 0.2.3's subagents and agent registry: `waitForTreeWork`, `interrupt`, `drainDescendants`, and a registry that lists its agents. */
+function setup023(waitForTreeWork: (agent: Agent) => Promise<boolean>, children: { id: string; parentSession: string; status: string }[]) {
+  const jobs = jobRegistry()
+  const agent = { id: 'worker-t1', status: 'idle', whenIdle: async () => {}, inbox: { nextTurn: [], nextStep: [] }, cancel: vi.fn(),
+    session: { header: {} } } as unknown as Agent & { status: string; cancel: ReturnType<typeof vi.fn> }
+  const live = new Map<string, { status: string } & Record<string, unknown>>(children.map(child => [child.id, { id: child.id, status: child.status,
+    inbox: { nextTurn: [], nextStep: [] }, session: { header: { parentSession: child.parentSession } } }]))
+  live.set(agent.id, agent as never)
+  const subagents = { waitForTreeWork: vi.fn(waitForTreeWork),
+    interrupt: vi.fn((id: string) => { const child = live.get(id); if (child) child.status = 'idle' }),
+    drainDescendants: vi.fn(async () => { for (const child of children) live.delete(child.id) }) }
+  const services: Record<string, unknown> = { jobs: jobs.service, subagents }
+  const ctx = { get: (name: string) => services[name], agents: { get: (id: string) => live.get(id), list: () => [...live.values()] } } as unknown as Context
+  return { ctx, agent, subagents, live }
+}
+
+it('waits for a worker\'s subagents with DSH 0.2.3\'s waitForTreeWork', async () => {
+  const { ctx, agent, subagents } = setup023(async () => false, [])
+  expect(await untilQuiet(ctx, agent, new AbortController().signal)).toBe(true)
+  expect(subagents.waitForTreeWork).toHaveBeenCalledWith(agent)
+})
+
+it('on DSH 0.2.3, stops what a worker\'s subagents run without closing its tree, and releases the resident ones before an unload', async () => {
+  const { ctx, agent, subagents, live } = setup023(async () => false,
+    [{ id: 'child-1', parentSession: 'worker-t1', status: 'running' }, { id: 'grandchild', parentSession: 'child-1', status: 'idle' }])
+  // A subagent at work, at any depth, holds the worker; another worker's does not.
+  expect(await hasLiveSubagents(ctx, 'worker-t1')).toBe(true)
+  expect(await hasLiveSubagents(ctx, 'worker-other')).toBe(false)
+  await stopSubagents(ctx, agent)
+  expect(subagents.interrupt).toHaveBeenCalledTimes(1)
+  expect(subagents.interrupt).toHaveBeenCalledWith('child-1', agent)
+  expect(subagents.drainDescendants).not.toHaveBeenCalled()
+  expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+  // Idle and resident, they hold the worker no more; a stop with nothing at work cancels nothing.
+  expect(await hasLiveSubagents(ctx, 'worker-t1')).toBe(false)
+  agent.cancel.mockClear()
+  await stopSubagents(ctx, agent)
+  expect(agent.cancel).not.toHaveBeenCalled()
+  // Before the worker unloads, its resident subagents are released.
+  await releaseSubagentTree(ctx, agent)
+  expect(subagents.drainDescendants).toHaveBeenCalledWith([agent])
+  expect(live.has('child-1') || live.has('grandchild')).toBe(false)
+  subagents.drainDescendants.mockClear()
+  await releaseSubagentTree(ctx, agent)
+  expect(subagents.drainDescendants).not.toHaveBeenCalled()
 })

@@ -158,8 +158,8 @@ function sourceStatuses(): SourceStatusRow[] {
   })
 }
 const stateView = (): StateView => ({
-  setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
-  masterId: 'master', main: { status: 'idle', since: '2026-09-23T00:00:00Z' }, paused: server.settings.paused,
+  setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers, loaded: 2 },
+  masterId: 'master', replacedMasters: 0, main: { status: 'idle', since: '2026-09-23T00:00:00Z' }, paused: server.settings.paused,
   // The panel does not read health; the service script does.
   health: {},
 })

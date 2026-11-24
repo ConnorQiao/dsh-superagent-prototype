@@ -17,7 +17,7 @@ import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
-import { cancelled, collectJob, hasLiveSubagents, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
+import { cancelled, collectJob, hasLiveSubagents, killJobs, releaseSubagentTree, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
@@ -228,6 +228,8 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /** The worker Sessions seen loaded, by Session id, until DSH disposes them (`loadedCount`). */
+  private readonly loaded = new Set<string>()
   /** When each loaded worker Session last went idle, by Session id: the Sessions the sweep that unloads idle ones looks at. */
   private readonly idleSince = new Map<string, number>()
   /** Unloads of worker Sessions that run, by ticket, which a launch or a delivery of the ticket waits for. */
@@ -413,6 +415,11 @@ export class DshExecutor implements Executor {
     }
     await until(stop(), undefined, SHUTDOWN_STOP_MS)
   }
+  /** Number of worker Sessions loaded in memory, idle ones included, which the sweep unloads (`GET state`). */
+  loadedCount(): number {
+    for (const id of this.loaded) if (!this.host.context.agents.get(id as SessionId)) this.loaded.delete(id)
+    return this.loaded.size
+  }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
@@ -493,6 +500,7 @@ export class DshExecutor implements Executor {
     const ctx = this.host.context
     this.disposers.push(ctx.on('agent/status', ({ agent, status }) => {
       if (ticketOfSession(agent.id) !== undefined) {
+        this.loaded.add(agent.id)
         if (status !== 'idle') this.idleSince.delete(agent.id)
         else if (!this.idleSince.has(agent.id)) this.idleSince.set(agent.id, Date.now())
       }
@@ -505,10 +513,12 @@ export class DshExecutor implements Executor {
       if (ticket && assignment && liveTicket(ticket)) void this.background(this.workerIdle(ticket, assignment, agent))
     }))
     this.disposers.push(ctx.on('agent/created', ({ agent }) => {
-      if (ticketOfSession(agent.id) !== undefined && agent.status === 'idle' && !this.idleSince.has(agent.id)) this.idleSince.set(agent.id, Date.now())
+      if (ticketOfSession(agent.id) === undefined) return undefined
+      this.loaded.add(agent.id)
+      if (agent.status === 'idle' && !this.idleSince.has(agent.id)) this.idleSince.set(agent.id, Date.now())
       return undefined
     }))
-    this.disposers.push(ctx.on('agent/disposed', ({ agent }) => { this.idleSince.delete(agent.id) }))
+    this.disposers.push(ctx.on('agent/disposed', ({ agent }) => { this.idleSince.delete(agent.id); this.loaded.delete(agent.id) }))
     const sweeper = this.sweeper = setInterval(() => {
       this.sweep().catch((error: unknown) => { ctx.logger.warn('dsh-superagent could not unload idle worker Sessions: %s', String(error)) })
     }, SWEEP_MS)
@@ -580,7 +590,9 @@ export class DshExecutor implements Executor {
   }
   /** Unload one worker Session, which a launch or a delivery of its ticket waits for meanwhile. */
   private async unload(ticketId: string, agent: Agent): Promise<void> {
-    const unload: Promise<void> = this.host.sessions.unload(agent.id).then(done => {
+    // Its resident subagents go first; then the worker, if nothing reached it meanwhile.
+    const unload: Promise<void> = releaseSubagentTree(this.host.context, agent)
+      .then(() => agent.status === 'idle' && this.unloadable(ticketId, agent) ? this.host.sessions.unload(agent.id) : false).then(done => {
       if (!done) return
       this.idleSince.delete(agent.id)
       this.host.context.logger.info('dsh-superagent: unloaded the idle worker Session %s from memory', agent.id)

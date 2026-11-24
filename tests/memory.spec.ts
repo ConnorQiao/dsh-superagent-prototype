@@ -34,6 +34,7 @@ it('unloads a worker Session that sat idle with nothing to do, and loads it agai
   await h.runtime.executor.sweep(at + 11 * MINUTE)
   expect(h.controller.releaseAgent).toHaveBeenCalledWith(sessionId)
   expect(h.agents.has(sessionId)).toBe(false)
+  expect((await h.api('GET', 'state')).body).toMatchObject({ load: { loaded: 0 }, replacedMasters: 0 })
   // A person's message on its thread resumes the ticket, whose Session loads again for it.
   h.deliveries.mockClear()
   h.runtime.receive(feishu('2', '再确认一下', { mentions: [], root_id: 'om_1' }))
@@ -86,6 +87,7 @@ it('moves the main Session to a new one that starts from its summary once its co
   await h.runtime.idle()
   expect(h.runtime.store.get(KV.runtime.masterId)).toBe(to)
   expect(h.runtime.previousMasters()).toEqual([from])
+  expect((await h.api('GET', 'state')).body).toMatchObject({ masterId: to, replacedMasters: 1 })
   expect(h.agents.has(from)).toBe(false)
   // The new main Session has the main Session's tools, the summary as a notice that woke nothing, and the undecided candidate.
   expect(h.tools.get(to)?.has('orchestrator_route')).toBe(true)

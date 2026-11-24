@@ -13,11 +13,19 @@ interface Jobs {
   kill(id: string, caller: string, reason?: string): unknown
   readonly events: { subscribe(filter: { owner: string }, listener: (event: { type: string }) => void): () => void }
 }
-/** What the Executor uses of DSH's subagents: joining a worker's subagents that work, its subagents, and releasing them. */
+/**
+ * What the Executor uses of DSH's subagents. superagent was written against `waitForChildren`, `listChildren` and
+ * `drainChildren`, which it uses where a DSH has them. DSH 0.2.3 has none of them: it joins a tree's work with
+ * `waitForTreeWork`, stops one subagent's run with `interrupt`, and releases a whole tree with `drainDescendants`, which
+ * also admits no new subagent under that root until the root leaves the registry.
+ */
 interface Subagents {
-  waitForChildren(parent: Agent): Promise<boolean>
-  listChildren(parentSessionId: string): Promise<readonly { id: string }[]>
-  drainChildren(parent: Agent, childIds: readonly string[]): Promise<void>
+  waitForTreeWork?(root: Agent): Promise<boolean>
+  interrupt?(targetSessionId: string, authority: Agent): void
+  drainDescendants?(parents: readonly Agent[]): Promise<void>
+  waitForChildren?(parent: Agent): Promise<boolean>
+  listChildren?(parentSessionId: string): Promise<readonly { id: string }[]>
+  drainChildren?(parent: Agent, childIds: readonly string[]): Promise<void>
 }
 /** How long a stop waits for a killed job to end, collecting its end so the worker is not woken to hear of it. */
 const KILL_WAIT_MS = 10_000
@@ -49,10 +57,33 @@ const joins = new WeakMap<Agent, Promise<boolean>>()
 function childrenEnd(subagents: Subagents, agent: Agent): Promise<boolean> {
   let join = joins.get(agent)
   if (!join) {
-    join = subagents.waitForChildren(agent).finally(() => { joins.delete(agent) })
+    const work = typeof subagents.waitForTreeWork === 'function' ? subagents.waitForTreeWork(agent)
+      : typeof subagents.waitForChildren === 'function' ? subagents.waitForChildren(agent) : Promise.resolve(false)
+    join = work.finally(() => { joins.delete(agent) })
     joins.set(agent, join)
   }
   return join
+}
+/**
+ * The loaded subagents of a Session, at any depth: on a DSH whose agent registry lists its agents, the ones whose Session
+ * descends from it (`parentSession`); elsewhere its direct children the subagent catalog lists that are loaded.
+ */
+async function liveSubagents(ctx: Context, sessionId: string): Promise<string[]> {
+  const agents = ctx.agents as unknown as { list?(): readonly Agent[] }
+  if (typeof agents.list === 'function') {
+    const descends = (agent: Agent) => {
+      let parent = agent.session.header?.parentSession as string | undefined
+      for (let depth = 0; parent !== undefined && depth < 32; depth++) {
+        if (parent === sessionId) return true
+        parent = ctx.agents.get(parent as SessionId)?.session.header?.parentSession as string | undefined
+      }
+      return false
+    }
+    return agents.list().filter(descends).map(agent => agent.id)
+  }
+  const subagents = subagentsOf(ctx)
+  if (typeof subagents?.listChildren !== 'function') return []
+  return (await subagents.listChildren(sessionId)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
 }
 
 /** A job by its id and the first line of its label. */
@@ -141,10 +172,18 @@ export async function collectJob(ctx: Context, sessionId: string, job: { id: str
 export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = false): Promise<void> {
   const subagents = subagentsOf(ctx)
   if (!subagents) return
-  // The catalog lists every subagent the Session had; one that ended has no agent.
-  const live = (await subagents.listChildren(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
+  // One that ended has no agent.
+  let live = await liveSubagents(ctx, agent.id)
+  let release: Promise<void> = Promise.resolve()
+  if (typeof subagents.drainChildren === 'function') release = subagents.drainChildren(agent, live)
+  else {
+    // DSH 0.2.3 releases subagents only by closing the whole tree to new ones until the worker unloads, which would refuse
+    // the worker its subagents in its next turns: what they run stops instead, and they stay until the worker unloads.
+    live = live.filter(id => working(ctx, id))
+    if (typeof subagents.interrupt === 'function') for (const id of live) subagents.interrupt(id, agent)
+  }
   if (!live.length) return
-  try { await until(subagents.drainChildren(agent, live), undefined, DRAIN_LIMIT_MS) }
+  try { await until(release, undefined, DRAIN_LIMIT_MS) }
   finally {
     if (agent.status !== 'idle') cancelled.add(agent)
     agent.cancel({ kind: 'user' }, { keepInbox })
@@ -154,9 +193,22 @@ export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = fals
 
 /** Whether a Session has a subagent that is loaded, which works for it or waits to. */
 export async function hasLiveSubagents(ctx: Context, sessionId: string): Promise<boolean> {
+  return (await liveSubagents(ctx, sessionId)).some(id => working(ctx, id))
+}
+/** Whether a loaded subagent runs a turn or has input waiting, rather than idling resident. */
+function working(ctx: Context, sessionId: string): boolean {
+  const agent = ctx.agents.get(sessionId as SessionId)
+  return !!agent && (agent.status !== 'idle' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0)
+}
+/**
+ * Release the resident subagents of an idle worker that is about to unload: DSH 0.2.3 keeps a finished continuable
+ * subagent loaded under its root, and the unload of the root does not release it. Its `drainDescendants` closes the tree to
+ * new subagents until the root leaves the registry, which the unload does next.
+ */
+export async function releaseSubagentTree(ctx: Context, agent: Agent): Promise<void> {
   const subagents = subagentsOf(ctx)
-  if (!subagents) return false
-  return (await subagents.listChildren(sessionId)).some(child => ctx.agents.get(child.id as SessionId) !== undefined)
+  if (typeof subagents?.drainDescendants !== 'function' || !(await liveSubagents(ctx, agent.id)).length) return
+  await until(subagents.drainDescendants([agent]), undefined, DRAIN_LIMIT_MS)
 }
 
 /**
