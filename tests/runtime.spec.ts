@@ -1513,6 +1513,23 @@ it('fails a ticket at once on a worker error that is not passing, and relays it'
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
 })
 
+it('reports a failed turn of the main Session in health and the overview until a later turn ends without failing', async () => {
+  const ctx = (runtime as unknown as { ctx: Context }).ctx
+  const master = agents.get(runtime.masterId)!
+  const status = (value: string) => ctx.emit('agent/status', { agent: master, status: value } as never)
+  expect(runtime.health['main-session']).toMatchObject({ state: 'ready' })
+  status('running')
+  ctx.emit('agent/error', { agent: master, turn: 3, step: 1, error: new Error('HTTP 400:\n tool_use ids without tool_result') } as never)
+  status('idle')
+  expect(runtime.health['main-session']).toMatchObject({ state: 'error', detail: 'A turn of the main Session failed: HTTP 400: tool_use ids without tool_result' })
+  expect(overviewOf(runtime).problems).toContainEqual(expect.objectContaining({ kind: 'runtime-error', name: 'main-session' }))
+  status('running')
+  expect(runtime.health['main-session']).toMatchObject({ state: 'error' })
+  status('idle')
+  expect(runtime.health['main-session']).toMatchObject({ state: 'ready', detail: 'The main Session finished a turn' })
+  expect(overviewOf(runtime).problems).not.toContainEqual(expect.objectContaining({ name: 'main-session' }))
+})
+
 it('refuses the main Session a bash command that runs sleep and a long job wait, as reports arrive by themselves, and no worker', async () => {
   const bash = (command: string) => ({ name: 'bash', arguments: { command, description: 'x' } })
   const main = guards.get(runtime.masterId)!

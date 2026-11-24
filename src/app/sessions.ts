@@ -30,6 +30,11 @@ export interface SessionsHost {
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
+  /**
+   * The `main-session` health entry: the main Session's latest failed turn, until a later turn of it ends without failing.
+   * A main Session whose turns keep failing judges nothing and answers no one, which nothing else reports.
+   */
+  readonly mainHealth?: HealthEntry
   readonly masterId: string
   readonly lifetime: AbortSignal
   closing(): boolean
@@ -97,6 +102,8 @@ export class Sessions {
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
   private readonly ctx: Context
+  /** Whether the main Session's current run of turns failed: set by its `agent/error`, cleared when it starts again. */
+  private mainFailing = false
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
@@ -133,7 +140,21 @@ export class Sessions {
     })
     ctx.on('agent/status', ({ agent, status }) => {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
+      if (agent.id === this.host.masterId) this.mainStatus(status)
     })
+    ctx.on('agent/error', ({ agent, error }) => {
+      if (agent.id !== this.host.masterId || this.host.closing()) return
+      this.mainFailing = true
+      const text = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim().slice(0, 300)
+      this.host.mainHealth?.set({ state: 'error', detail: `A turn of the main Session failed: ${text}`, at: new Date().toISOString() })
+    })
+  }
+  /** Clear the main Session's failure once one of its turns ends without failing (a run starts afresh on each wake). */
+  private mainStatus(status: string): void {
+    if (status === 'running') { this.mainFailing = false; return }
+    if (status !== 'idle' || this.mainFailing || this.host.closing()) return
+    if (this.host.mainHealth?.get()?.state === 'error')
+      this.host.mainHealth.set({ state: 'ready', detail: 'The main Session finished a turn', at: new Date().toISOString() })
   }
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {

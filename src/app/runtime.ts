@@ -121,7 +121,8 @@ export class Runtime extends Service implements SourceHost {
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
-      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
+      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'),
+        mainHealth: board.claim('main-session', { state: 'ready', detail: 'No turn of the main Session has failed' }), masterId,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
         tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
