@@ -45,6 +45,21 @@ export interface SessionsHost {
 }
 
 /**
+ * An error and its causes on one line, each with its code when it has one, clipped: provider adapters wrap the failure that
+ * matters (`fetch failed`, `other side closed`, a missing attachment) in a generic one such as "transport failed".
+ */
+export function errorChain(error: unknown): string {
+  const parts: string[] = []
+  for (let current: unknown = error, depth = 0; current !== undefined && current !== null && depth < 5; depth++) {
+    const item = current as { message?: unknown; code?: unknown; cause?: unknown }
+    const message = current instanceof Error || typeof item.message === 'string' ? String(item.message) : String(current)
+    parts.push(typeof item.code === 'string' || typeof item.code === 'number' ? `${message} (${item.code})` : message)
+    current = typeof current === 'object' ? item.cause : undefined
+  }
+  return parts.join(' ← ').replace(/\s+/g, ' ').trim().slice(0, 300)
+}
+
+/**
  * What Sessions registered for an agent it decorated: the releases of its prompt section, tools and skill scope, the scope
  * its skills are registered in, and the skills of one prompt revision; for a worker's subagent, only its tool limits.
  */
@@ -148,8 +163,7 @@ export class Sessions {
     ctx.on('agent/error', ({ agent, error }) => {
       if (agent.id !== this.host.masterId || this.host.closing()) return
       this.mainFailing = true
-      const text = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim().slice(0, 300)
-      this.host.mainHealth?.set({ state: 'error', detail: `A turn of the main Session failed: ${text}`, at: new Date().toISOString() })
+      this.host.mainHealth?.set({ state: 'error', detail: `A turn of the main Session failed: ${errorChain(error)}`, at: new Date().toISOString() })
     })
   }
   /**
