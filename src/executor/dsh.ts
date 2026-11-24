@@ -580,7 +580,11 @@ export class DshExecutor implements Executor {
   }
   /** Unload one worker Session, which a launch or a delivery of its ticket waits for meanwhile. */
   private async unload(ticketId: string, agent: Agent): Promise<void> {
-    const unload: Promise<void> = this.host.sessions.unload(agent.id).then(done => { if (done) this.idleSince.delete(agent.id) })
+    const unload: Promise<void> = this.host.sessions.unload(agent.id).then(done => {
+      if (!done) return
+      this.idleSince.delete(agent.id)
+      this.host.context.logger.info('dsh-superagent: unloaded the idle worker Session %s from memory', agent.id)
+    })
       .finally(() => { if (this.unloading.get(ticketId) === unload) this.unloading.delete(ticketId) })
     this.unloading.set(ticketId, unload)
     await unload
