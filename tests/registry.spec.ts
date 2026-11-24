@@ -158,5 +158,18 @@ describe('Source registry', () => {
     const reply: OutboundMessage = { id: 'reply-1', channel, text: 'Done', kind: 'reply' }
     expect(await sources.send(reply, commands)).toBe('sent')
     expect(run.mock.calls[0]![1]).toEqual(expect.arrayContaining(['+messages-reply', '--message-id', 'om_dm']))
+    expect(run.mock.calls[0]![1]).toContain('--reply-in-thread')
+  })
+  it('replies by quoting the message instead of opening a topic when threadReplies is off', async () => {
+    const settings = SettingsSchema.parse({ sources: { feishu: { enabled: true, config: { threadReplies: false } } } })
+    const sources = new SourceRegistry(() => settings)
+    sources.register(feishuKind)
+    const trigger = feishuTrigger({ message_id: 'om_dm', chat_id: 'oc_dm', chat_type: 'p2p', sender_id: 'ou_alice', sender_type: 'user',
+      content: 'fix it', create_time: '1757376000000' }, 'ou_bot', 'cli_bot')!
+    const commands = new Commands(() => testDeployment(), {}, new AbortController().signal)
+    const run = vi.spyOn(commands, 'run').mockResolvedValue('{"ok":true,"data":{}}')
+    expect(await sources.send({ id: 'reply-2', channel: trigger.channel!, text: 'Done', kind: 'reply' }, commands)).toBe('sent')
+    expect(run.mock.calls[0]![1]).toEqual(expect.arrayContaining(['+messages-reply', '--message-id', 'om_dm', '--idempotency-key', 'reply-2']))
+    expect(run.mock.calls[0]![1]).not.toContain('--reply-in-thread')
   })
 })
