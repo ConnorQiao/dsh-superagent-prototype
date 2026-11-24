@@ -118,3 +118,41 @@ it('numbers the main Sessions that follow one another', () => {
   expect(nextMasterId('orchestrator-abc-r1')).toBe('orchestrator-abc-r2')
   expect(nextMasterId('orchestrator-abc-g1')).toBe('orchestrator-abc-g1-r1')
 })
+
+it('lets the main Session reach a ticket whose worker Session was unloaded: what it sends loads it again, and reading its work does not', async () => {
+  h = await startRuntime()
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 查一下回归'))
+  const master = h.runtime.masterId
+  /** The worker ends its turn without a report, which makes the ticket wait, and its Session is unloaded once idle long enough. */
+  const unloadIdle = async () => {
+    idle(h!, sessionId)
+    await h!.runtime.idle(); await settle()
+    await h!.runtime.executor.sweep(Date.now() + 11 * MINUTE)
+    expect(h!.agents.has(sessionId)).toBe(false)
+    h!.deliveries.mockClear()
+  }
+  const delivered = (text: string) => h!.deliveries.mock.calls.some(([call]) => call.sessionId === sessionId && call.text.includes(text))
+  await unloadIdle()
+  // Reading its transcript reads the stored history and loads nothing.
+  await h.runTool(master, 'orchestrator_read', { resource: `ticket/${ticket.id}/transcript` })
+  expect(h.agents.has(sessionId)).toBe(false)
+  // A note from the main Session reaches it, and loads it again.
+  await h.runTool(master, 'orchestrator_ticket_note', { ticket_id: ticket.id, text: '另一张工单查到版本号是 1.2.3' })
+  await h.runtime.idle(); await settle()
+  expect(h.agents.has(sessionId)).toBe(true)
+  expect(delivered('另一张工单查到版本号是 1.2.3')).toBe(true)
+  // So does a status request to a waiting worker.
+  await unloadIdle()
+  expect(await h.runTool(master, 'orchestrator_ticket_request_status', { ticket_id: ticket.id })).toMatchObject({ reason: 'Asked the worker for a status report' })
+  await h.runtime.idle(); await settle()
+  expect(h.agents.has(sessionId)).toBe(true)
+  // And a message from another thread that the main Session attaches to it.
+  await unloadIdle()
+  const pointing = feishu('7', '@bot 刚才那个回归查到哪一步了')
+  h.runtime.receive(pointing)
+  await h.runtime.idle()
+  await h.route({ kind: 'attach', trigger_id: pointing.id, ticket_id: ticket.id })
+  await h.runtime.idle(); await settle()
+  expect(h.agents.has(sessionId)).toBe(true)
+  expect(delivered('刚才那个回归查到哪一步了')).toBe(true)
+})
