@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { Thread, Ticket, Trigger } from '../src/core/index.ts'
-import { extensionTools, loadToolModules, type WorkerToolContext, type WorkerToolModule } from '../src/app/tools/extensions.ts'
+import { extensionTools, loadToolModules, mainExtensionTools, type MainToolContext, type WorkerToolContext, type WorkerToolModule }
+  from '../src/app/tools/extensions.ts'
 
 const dir = mkdtempSync(join(tmpdir(), 'dsh-superagent-tools-'))
 afterAll(() => { rmSync(dir, { recursive: true, force: true }) })
@@ -24,14 +25,16 @@ function storeOf(triggers: Trigger[], threads: Thread[] = []) {
 }
 
 describe('tool modules', () => {
-  it('imports each module once, and skips one that fails or exports no workerTools', async () => {
+  it('imports each module once, and skips one that fails or exports neither workerTools nor mainTools', async () => {
     writeFileSync(join(dir, 'good.mjs'), 'export const workerTools = () => []\n')
+    writeFileSync(join(dir, 'main.mjs'), 'export const mainTools = () => []\n')
     writeFileSync(join(dir, 'none.mjs'), 'export const other = 1\n')
     writeFileSync(join(dir, 'broken.mjs'), 'throw new Error("boom")\n')
     const warnings: string[] = []
-    const modules = await loadToolModules([join(dir, 'good.mjs'), join(dir, 'none.mjs'), join(dir, 'broken.mjs')], message => warnings.push(message))
-    expect(modules).toHaveLength(1)
-    expect(warnings.join('\n')).toMatch(/none\.mjs exports no workerTools/)
+    const modules = await loadToolModules([join(dir, 'good.mjs'), join(dir, 'main.mjs'), join(dir, 'none.mjs'), join(dir, 'broken.mjs')],
+      message => warnings.push(message))
+    expect(modules).toHaveLength(2)
+    expect(warnings.join('\n')).toMatch(/none\.mjs exports no workerTools or mainTools/)
     expect(warnings.join('\n')).toMatch(/broken\.mjs: boom/)
   })
 
@@ -68,5 +71,27 @@ describe('tool modules', () => {
     expect(tools.map(item => item.name)).toEqual(['ff_lookup'])
     expect(warnings).toHaveLength(4)
     expect(tools[0]!.schema).toBeInstanceOf(z.ZodType)
+  })
+
+  it('gives the main Session the modules\' mainTools, acting for any person\'s message the host recorded, under unique names', async () => {
+    let context: MainToolContext | undefined
+    const execute = async () => ({ ok: true })
+    const modules: WorkerToolModule[] = [
+      { workerTools: () => [{ name: 'ff_worker_only', description: 'w', schema: z.object({}), execute }] },
+      { mainTools: given => { context = given; return [
+        { name: 'ff_web_search', description: 'Search', schema: given.z.object({ query: given.z.string() }), execute },
+        { name: 'orchestrator_reply', description: 'taken', schema: given.z.object({}), execute },
+      ] } },
+    ]
+    const warnings: string[] = []
+    const store = storeOf([trigger('feishu:om_root'), trigger('feishu:om_bot', { human: false })])
+    const tools = mainExtensionTools(modules, store, new Set(['orchestrator_reply']), message => warnings.push(message))
+    expect(tools.map(item => item.name)).toEqual(['ff_web_search'])
+    expect(warnings.join('\n')).toMatch(/orchestrator_reply/)
+    expect(context!.asker('feishu:om_root')).toMatchObject({ actor: 'ou_alice', meta: { messageId: 'om_root' } })
+    expect(() => context!.asker('feishu:om_bot')).toThrow(/not a person's message/)
+    expect(() => context!.asker('feishu:om_missing')).toThrow(/not a person's message/)
+    // A module with only mainTools gives an Executor Session nothing.
+    expect(extensionTools([modules[1]!], store, ticket, new Set(), () => {})).toEqual([])
   })
 })

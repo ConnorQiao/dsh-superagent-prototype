@@ -1,7 +1,8 @@
 /**
  * Tools that the modules named in the plugin's `toolModules` add to every Executor Session, bound to the ticket the Session
- * works. A module runs in the DeepSeek Harness process, not in the worker's sandbox, so it can hold what the worker must not
- * read; `asker` tells it whose message it is serving, from the host's records rather than from the model's arguments.
+ * works, and, through an optional `mainTools`, to the main Session. A module runs in the DeepSeek Harness process, not in a
+ * sandbox, so it can hold what the Sessions must not read; `asker` tells it whose message it is serving, from the host's
+ * records rather than from the model's arguments.
  */
 import { pathToFileURL } from 'node:url'
 import { z } from 'zod'
@@ -28,20 +29,27 @@ export interface WorkerToolContext {
   /** The zod this bundle builds tool schemas with; a module's schemas must come from it. */
   readonly z: typeof z
 }
-/** A module named in `toolModules`. */
-export interface WorkerToolModule { workerTools(context: WorkerToolContext): Tool[] }
+/** What a module's `mainTools` receives for the main Session. */
+export interface MainToolContext {
+  /** The person whose message `triggerId` is, when the host recorded it as a person's message; throws otherwise. */
+  asker(triggerId: string): TicketAsker
+  /** The zod this bundle builds tool schemas with; a module's schemas must come from it. */
+  readonly z: typeof z
+}
+/** A module named in `toolModules`: tools for Executor Sessions, the main Session, or both. */
+export interface WorkerToolModule { workerTools?(context: WorkerToolContext): Tool[]; mainTools?(context: MainToolContext): Tool[] }
 
 const NAME = /^[a-z][a-z0-9_]{0,63}$/
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
-/** Imports each module once; one that fails to import or exports no `workerTools` is skipped with a warning. */
+/** Imports each module once; one that fails to import or exports neither `workerTools` nor `mainTools` is skipped with a warning. */
 export async function loadToolModules(paths: readonly string[], warn: (message: string) => void): Promise<WorkerToolModule[]> {
   const modules: WorkerToolModule[] = []
   for (const path of paths) {
     try {
       const loaded = await import(pathToFileURL(path).href) as Partial<WorkerToolModule>
-      if (typeof loaded.workerTools === 'function') modules.push(loaded as WorkerToolModule)
-      else warn(`tool module ${path} exports no workerTools function`)
+      if (typeof loaded.workerTools === 'function' || typeof loaded.mainTools === 'function') modules.push(loaded as WorkerToolModule)
+      else warn(`tool module ${path} exports no workerTools or mainTools function`)
     } catch (error) {
       warn(`could not load tool module ${path}: ${reason(error)}`)
     }
@@ -70,11 +78,36 @@ export function extensionTools(modules: readonly WorkerToolModule[], store: Pick
     },
     z,
   }
+  return collect(modules, module => module.workerTools?.(context), taken, warn)
+}
+
+/**
+ * The tools the modules give the main Session. `asker` accepts any trigger the host recorded as a person's message: the main
+ * Session sees every one before it is judged.
+ */
+export function mainExtensionTools(modules: readonly WorkerToolModule[], store: Pick<Store, 'triggers'>, taken: ReadonlySet<string>,
+  warn: (message: string) => void): Tool[] {
+  if (modules.length === 0) return []
+  const context: MainToolContext = {
+    asker: triggerId => {
+      const trigger = store.triggers.get(triggerId)
+      if (!trigger || !trigger.human) throw new Error(`${triggerId} is not a person's message`)
+      return { triggerId: trigger.id, source: trigger.source, actor: trigger.actor.id, ...trigger.addressed ? { addressed: trigger.addressed } : {},
+        at: trigger.at, meta: { ...trigger.meta } }
+    },
+    z,
+  }
+  return collect(modules, module => module.mainTools?.(context), taken, warn)
+}
+
+/** Each module's tools in turn; a malformed tool, a taken name or a schema of another zod is skipped with a warning. */
+function collect(modules: readonly WorkerToolModule[], build: (module: WorkerToolModule) => unknown, taken: ReadonlySet<string>,
+  warn: (message: string) => void): Tool[] {
   const names = new Set(taken)
   const tools: Tool[] = []
   for (const module of modules) {
     let provided: unknown
-    try { provided = module.workerTools(context) } catch (error) {
+    try { provided = build(module) } catch (error) {
       warn(`a tool module failed to build its tools: ${reason(error)}`)
       continue
     }
