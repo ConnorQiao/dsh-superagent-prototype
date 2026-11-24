@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { Thread, Ticket, Trigger } from '../src/core/index.ts'
-import { extensionTools, loadToolModules, mainExtensionTools, type MainToolContext, type WorkerToolContext, type WorkerToolModule }
+import { extensionTools, loadToolModules, mainExtensionTools, mainSchedules, type MainToolContext, type WorkerToolContext, type WorkerToolModule }
   from '../src/app/tools/extensions.ts'
 
 const dir = mkdtempSync(join(tmpdir(), 'dsh-superagent-tools-'))
@@ -25,7 +25,7 @@ function storeOf(triggers: Trigger[], threads: Thread[] = []) {
 }
 
 describe('tool modules', () => {
-  it('imports each module once, and skips one that fails or exports neither workerTools nor mainTools', async () => {
+  it('imports each module once, and skips one that fails or exports none of workerTools, mainTools and reminded', async () => {
     writeFileSync(join(dir, 'good.mjs'), 'export const workerTools = () => []\n')
     writeFileSync(join(dir, 'main.mjs'), 'export const mainTools = () => []\n')
     writeFileSync(join(dir, 'none.mjs'), 'export const other = 1\n')
@@ -34,7 +34,7 @@ describe('tool modules', () => {
     const modules = await loadToolModules([join(dir, 'good.mjs'), join(dir, 'main.mjs'), join(dir, 'none.mjs'), join(dir, 'broken.mjs')],
       message => warnings.push(message))
     expect(modules).toHaveLength(2)
-    expect(warnings.join('\n')).toMatch(/none\.mjs exports no workerTools or mainTools/)
+    expect(warnings.join('\n')).toMatch(/none\.mjs exports no workerTools, mainTools or reminded function/)
     expect(warnings.join('\n')).toMatch(/broken\.mjs: boom/)
   })
 
@@ -98,5 +98,54 @@ describe('tool modules', () => {
     expect(() => context!.asker('feishu:om_missing')).toThrow(/not a person's message/)
     // A module with only mainTools gives an Executor Session nothing.
     expect(extensionTools([modules[1]!], store, ticket, new Set(), () => {})).toEqual([])
+  })
+  it('loads a module that only delivers the occurrences of the scheduled tasks it manages', async () => {
+    const path = join(dir, 'reminded.mjs')
+    writeFileSync(path, 'export function reminded() { return true }\n')
+    const [module] = await loadToolModules([path], () => {})
+    expect(typeof module?.reminded).toBe('function')
+  })
+
+  it('manages DSH\'s scheduled tasks for a module, each delivered to the main Session it is now, and keeps DSH\'s error codes', async () => {
+    const calls: unknown[][] = []
+    const entry = (id: string, fields: Record<string, unknown> = {}) => ({ id, title: 't', prompt: 'p', kind: 'rrule',
+      rrule: 'DTSTART;TZID=Asia/Singapore:20261125T090000\nRRULE:FREQ=DAILY', status: 'active', scheduledAt: '2026-11-25T01:00:00.000Z',
+      involvedSessionIds: ['main-1'], lastDelivery: { scheduledAt: '2026-11-24T01:00:00.000Z', deliveredAt: '2026-11-24T01:00:01.000Z' }, ...fields })
+    const service = {
+      list: async (request: { offset: number }) => { calls.push(['list', request]); return { items: request.offset === 0 ? [entry('a'), entry('b')] : [], total: 2 } },
+      view: async ({ id }: { id: string }) => (id === 'a' ? entry('a') : { id, code: 'schedule_not_found' }),
+      create: async (request: { title: string }, actor: string): Promise<unknown> => { calls.push(['create', request, actor]); return entry('c', { title: request.title }) },
+      edit: async (request: { id: string; action: string }, actor: string) => {
+        calls.push(['edit', request, actor])
+        if (request.action === 'delete') return { id: request.id, deleted: true }
+        return request.id === 'gone' ? { id: request.id, code: 'schedule_not_found' } : entry(request.id, { status: 'paused' })
+      },
+    }
+    let master = 'main-1'
+    const schedules = mainSchedules(() => service, () => master)!
+    expect(await schedules.list()).toEqual([
+      { id: 'a', title: 't', prompt: 'p', kind: 'rrule', rrule: entry('a').rrule, status: 'active', scheduledAt: '2026-11-25T01:00:00.000Z',
+        lastDeliveredAt: '2026-11-24T01:00:01.000Z' },
+      expect.objectContaining({ id: 'b' }),
+    ])
+    expect(await schedules.view('a')).toMatchObject({ id: 'a' })
+    expect(await schedules.view('missing')).toBeUndefined()
+    // The main Session moved to a new one: what is created now goes to it.
+    master = 'main-1-r1'
+    const rrule = 'DTSTART;TZID=Asia/Singapore:20261125T090000\nRRULE:FREQ=DAILY'
+    expect(await schedules.create({ title: '提醒交日报', prompt: 'ff_schedule: 3', rrule })).toMatchObject({ id: 'c', title: '提醒交日报' })
+    expect(calls.at(-1)).toEqual(['create', { title: '提醒交日报', prompt: 'ff_schedule: 3', timing: { kind: 'rrule', rrule },
+      target: { kind: 'session', sessionId: 'main-1-r1' } }, 'main-1-r1'])
+    expect(await schedules.update('a', { active: false })).toMatchObject({ status: 'paused' })
+    expect(calls.at(-1)).toEqual(['edit', { id: 'a', action: 'update', patch: { active: false } }, 'main-1-r1'])
+    await schedules.update('a', { title: '新标题', rrule })
+    expect(calls.at(-1)).toEqual(['edit', { id: 'a', action: 'update', patch: { title: '新标题', timing: { kind: 'rrule', rrule } } }, 'main-1-r1'])
+    expect(await schedules.update('gone', { title: 'x' })).toBeUndefined()
+    await expect(schedules.update('a', {})).rejects.toThrow('Nothing to change')
+    expect(await schedules.remove('a')).toBe(true)
+    service.create = async () => { throw Object.assign(new Error('DTSTART must name an existing local time'), { code: 'invalid_rule' }) }
+    await expect(schedules.create({ title: 'x', prompt: 'y', rrule: 'bad' })).rejects.toThrow('invalid_rule: DTSTART must name an existing local time')
+    // A host without DSH's schedule service gives modules none.
+    expect(mainSchedules(() => undefined, () => master)).toBeUndefined()
   })
 })

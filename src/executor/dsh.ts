@@ -15,7 +15,7 @@ import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { WorktreeNameSchema } from '../app/assessment.ts'
-import { resultRelay } from '../app/notices.ts'
+import { longRunningRelay, resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, hasLiveSubagents, killJobs, releaseSubagentTree, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
 
@@ -69,7 +69,7 @@ export interface ExecutorHost {
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
-  readonly machine: Pick<Machine, 'stateDir' | 'workerUnloadMinutes'>
+  readonly machine: Pick<Machine, 'stateDir' | 'workerUnloadMinutes' | 'longRunningMinutes'>
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds' | 'unload'>
@@ -237,6 +237,8 @@ export class DshExecutor implements Executor {
   /** The timer of the sweep that unloads idle worker Sessions, which dispose clears. */
   private sweeper?: ReturnType<typeof setInterval>
   private sweeping = false
+  /** The main Session's notices of long-running assignments, by assignment: how many went out and when the last did. */
+  private readonly longNotices = new Map<string, { count: number; at: number }>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -565,6 +567,7 @@ export class DshExecutor implements Executor {
     if (this.host.closing() || this.sweeping) return
     this.sweeping = true
     try {
+      this.longRunning(at)
       const limit = this.host.machine.workerUnloadMinutes.get() * 60_000
       for (const [sessionId, since] of [...this.idleSince]) {
         if (this.host.closing()) return
@@ -576,6 +579,31 @@ export class DshExecutor implements Executor {
         await this.unload(ticketId, agent)
       }
     } finally { this.sweeping = false }
+  }
+  /**
+   * Tell the main Session of an assignment that has worked `longRunningMinutes` (an hour by default: work that takes longer
+   * than that is not normal) without a ready, blocked or failed report, and again each time as long again has passed since the
+   * last notice, so it looks whether the work is stuck: a worker that is stuck reports what it ran into, and the person hears it
+   * (`longRunningRelay`). A worker that handed off to a person, waits for one, or ended its turn without a report is not
+   * working, and gets no notice.
+   */
+  private longRunning(at: number): void {
+    const limit = this.host.machine.longRunningMinutes.get() * 60_000
+    const working = new Set<string>()
+    for (const ticket of this.host.store.tickets.open()) {
+      const assignment = runningAssignment(ticket), state = assignment?.report?.state
+      if (!assignment?.startedAt || !liveTicket(ticket) || waitsForPerson(ticket) || ticket.attention) continue
+      if (state === 'ready' || state === 'blocked' || state === 'failed' || state === 'waiting') continue
+      const started = Date.parse(assignment.startedAt)
+      if (!Number.isFinite(started)) continue
+      working.add(assignment.id)
+      const sent = this.longNotices.get(assignment.id)
+      if (at < (sent ? sent.at : started) + limit) continue
+      const count = (sent?.count ?? 0) + 1
+      this.longNotices.set(assignment.id, { count, at })
+      this.relay(longRunningRelay(ticket, assignment.id, Math.round((at - started) / 60_000), count))
+    }
+    for (const id of [...this.longNotices.keys()]) if (!working.has(id)) this.longNotices.delete(id)
   }
   /**
    * Whether nothing holds an idle worker Session: no delivery or launch on its way to it, no stop of its background work,

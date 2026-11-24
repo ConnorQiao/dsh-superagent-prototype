@@ -13,7 +13,7 @@ import type { Sessions } from '../sessions.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
-import { mainExtensionTools, type WorkerToolModule } from './extensions.ts'
+import { mainExtensionTools, type MainSchedules, type WorkerToolModule } from './extensions.ts'
 
 const RoutingNoteSchema = z.string().trim()
   .refine(text => wordCount(text) <= NOTE_WORDS, `Routing note must not exceed ${NOTE_WORDS} words (Chinese uses word segmentation). Shorten it; do not split it across deliveries.`)
@@ -34,6 +34,8 @@ export interface MainToolsHost {
   quietly<T>(run: () => T): T
   /** Modules named in `toolModules`; their `mainTools` join the main Session's own (`extensions.ts`). */
   readonly toolModules?: readonly WorkerToolModule[]
+  /** DSH's scheduled tasks for those modules, when the host runs DSH's schedule service (`mainSchedules`). */
+  readonly schedules?: MainSchedules
   warn?(message: string): void
 }
 /** Schedules an Engine pass to execute the recorded routing decision and formats the tool response. */
@@ -158,7 +160,8 @@ function routeTool(host: MainToolsHost): Tool {
 /** Builds the main Session's tools, then the tool modules' `mainTools`; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const own = ownMainTools(host, agent)
-  return [...own, ...mainExtensionTools(host.toolModules ?? [], host.store, new Set(own.map(item => item.name)), host.warn ?? (() => {}))]
+  return [...own, ...mainExtensionTools(host.toolModules ?? [], host.store, new Set(own.map(item => item.name)), host.warn ?? (() => {}),
+    host.schedules)]
 }
 function ownMainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
@@ -230,7 +233,7 @@ function ownMainTools(host: MainToolsHost, agent: Agent): Tool[] {
     }),
     tool({
       name: 'orchestrator_reply',
-      description: `Send an answer to a human question, a ready result, attention requiring human action, or progress for a person who asked about work in progress, as the replies section says; the gate refuses anything else. purpose=result needs a ticket in person/review after a ready report, a completed or merged one, or a dropped one whose matched rule asks for a closing message. purpose=progress needs trigger_id, the person's message that reached a live ticket, and goes out once for it. IM limit: ${IM_WORDS} words.`,
+      description: `Send an answer to a human question, a ready result, attention requiring human action, or progress for a person who asked about work in progress, as the replies section says; the gate refuses anything else. purpose=result needs a ticket in person/review after a ready report, one whose worker reported blocked or failed (tell the person what it ran into), a completed or merged one, or a dropped one whose matched rule asks for a closing message. purpose=progress needs trigger_id, the person's message that reached a live ticket, and goes out once for it. IM limit: ${IM_WORDS} words.`,
       schema: z.object({
         trigger_id: z.string().optional().describe('The original human question, for an answer; the person\'s message about work in progress, for progress.'),
         ticket_id: z.string().optional(),

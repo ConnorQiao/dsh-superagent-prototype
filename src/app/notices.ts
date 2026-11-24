@@ -104,6 +104,15 @@ export function followupRelay(message: { trigger_id: string },
   return { id: `followup:${message.trigger_id}`, text: JSON.stringify({ kind: 'follow_up', ...message, delivered_to: tickets,
     note: FOLLOWUP_NOTE }) }
 }
+/**
+ * A worker has worked on its assignment for `minutes` without a ready, blocked or failed report: the main Session looks at its
+ * transcript to see whether it is stuck, and if it is, has the worker report what it ran into and tells the person. One per
+ * assignment and count (`DshExecutor.longRunning`).
+ */
+export function longRunningRelay(ticket: Ticket, assignmentId: string, minutes: number, count: number): Relay {
+  return { id: `long-running:${ticket.id}:${assignmentId}:${count}`, text: JSON.stringify({ kind: 'worker_long_running', ticket: brief(ticket),
+    trigger_id: ticket.origin.triggerId, minutes, read: `ticket/${ticket.id}/transcript` }) }
+}
 /** Formats a worker report relay for the main Session (truncating summaries over 600 characters behind `ticket/<id>/result`); `replyTo` names the human question trigger it answers. */
 export function resultRelay(ticket: Ticket, state: string, text: string, replyTo?: string): Relay {
   const id = key('worker-result', ticket.id, ticket.updatedAt, text)

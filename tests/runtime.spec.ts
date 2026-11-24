@@ -1538,6 +1538,48 @@ it('turns a DSH scheduled task\'s occurrence in the main Session into the reques
   expect(relays(runtime.masterId).length).toBe(before)
 })
 
+it('lets a tool module deliver the occurrences of the tasks it manages, and turns the others into the requester\'s trigger', async () => {
+  const ask = feishu('42', '@bot 每天九点提醒我交日报')
+  await receive(ask)
+  await route({ kind: 'ignore', trigger_id: ask.id, reason: 'Scheduled the reminder and answered' })
+  const module = join(directory, 'schedules.mjs')
+  writeFileSync(module, [
+    'export const seen = []',
+    'export async function reminded(reminder, context) {',
+    '  globalThis.__remindedSeen = [...(globalThis.__remindedSeen ?? []), { ...reminder, schedules: typeof context.schedules }]',
+    "  return reminder.prompt.startsWith('ff_schedule:')",
+    '}',
+  ].join('\n'))
+  const next = await restart({ toolModules: [module] })
+  await next.ready
+  const ctx = (next as unknown as { ctx: Context }).ctx
+  const master = agents.get(next.masterId)! as unknown as { session: unknown }
+  const deliver = (id: string, prompt: string) => ctx.emit('session/event', master.session as never, { type: 'user/message', seq: 1, time: Date.now(),
+    data: { id, role: 'user', content: [{ type: 'text', text: ['[SCHEDULE REMINDER]', 'This is a scheduled message from the user',
+      `schedule_id_json: ${JSON.stringify(id)}`, 'occurrence_at: 2026-11-25T01:00:00.000Z', `reminder_prompt_json: ${JSON.stringify(prompt)}`].join('\n') }],
+      source: { kind: 'schedule' } } } as never)
+  deliver('sch_ff', 'ff_schedule: 7\n提醒我交日报')
+  deliver('sch_old', `trigger_id: ${ask.id}\n提醒我交日报`)
+  await vi.waitFor(() => expect((globalThis as { __remindedSeen?: unknown[] }).__remindedSeen).toHaveLength(2))
+  await next.idle()
+  expect((globalThis as { __remindedSeen?: unknown[] }).__remindedSeen).toEqual([
+    { scheduleId: 'sch_ff', occurrenceAt: '2026-11-25T01:00:00.000Z', prompt: 'ff_schedule: 7\n提醒我交日报', schedules: 'undefined' },
+    { scheduleId: 'sch_old', occurrenceAt: '2026-11-25T01:00:00.000Z', prompt: `trigger_id: ${ask.id}\n提醒我交日报`, schedules: 'undefined' },
+  ])
+  // The module delivered its own; the other became the requester's trigger, as without a module.
+  expect(next.store.triggers.get('schedule:sch_ff:2026-11-25T01:00:00.000Z')).toBeUndefined()
+  expect(next.store.triggers.get('schedule:sch_old:2026-11-25T01:00:00.000Z')).toMatchObject({ actor: ask.actor, text: '[定时提醒] 提醒我交日报' })
+  delete (globalThis as { __remindedSeen?: unknown[] }).__remindedSeen
+})
+
+it('leaves DSH\'s schedule tools out of the main Session when a tool module manages scheduled tasks', async () => {
+  await restart({ dshScheduleTools: false })
+  await runtime.ready
+  runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+  await acceptedTicket()
+  expect(restricts.get(runtime.masterId)!.at(-1)).toEqual({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill', 'web_fetch'] })
+})
+
 it('reports a failed turn of the main Session in health and the overview until a later turn ends without failing', async () => {
   const ctx = (runtime as unknown as { ctx: Context }).ctx
   const master = agents.get(runtime.masterId)!

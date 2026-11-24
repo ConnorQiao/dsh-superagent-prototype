@@ -39,6 +39,11 @@ export interface SessionsHost {
   /** A DSH scheduled task's occurrence delivered to the main Session (`schedules.ts`): the runtime turns it into a trigger. */
   reminded?(text: string): void
   /**
+   * Whether the main Session gets DSH's schedule tools (`dshScheduleTools`, on unless set): a deployment whose tool module
+   * manages scheduled tasks for each person turns them off, since they read and change every task of the host.
+   */
+  readonly scheduleTools?: boolean
+  /**
    * The main Session's context was compacted and the Session is idle: the runtime moves the main Session to a new one that
    * starts from `summary` (`Runtime.rotateMain`), so its history in memory and on disk does not grow without end.
    */
@@ -404,7 +409,8 @@ export class Sessions {
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
       const parent = scopeParentOf(agent)
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: MAIN_TOOLS.filter(name => agent.ctx.tools.get(name, parent)) }),
+      const main = host.scheduleTools === false ? MAIN_TOOLS.filter(name => !SCHEDULE_TOOLS.includes(name)) : MAIN_TOOLS
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: main.filter(name => agent.ctx.tools.get(name, parent)) }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent)) ?? scheduleGuard(execution, host.store.triggers)))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.

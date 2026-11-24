@@ -9,4 +9,5 @@ export const LIMITS = {
   admissionContextMaxPages: { min: 1, max: 100 },
   admissionContextTimeoutMs: { min: 1, max: 90_000 },
   workerUnloadMinutes: { min: 1, max: 1440 },
+  longRunningMinutes: { min: 1, max: 1440 },
 } as const

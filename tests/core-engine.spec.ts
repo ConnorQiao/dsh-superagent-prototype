@@ -1315,6 +1315,23 @@ describe('gaps', () => {
     h.engine.stopTicket(stopped)
     expect(() => h.engine.reply({ purpose: 'result', ticketId: stopped, text: 'x' })).toThrow(new UserError('notReady'))
   })
+  it('lets the main Session tell the person what a worker that reported blocked or failed ran into, but not before', () => {
+    const h = harness()
+    const blocked = accepted(h).ticketId!
+    expect(() => h.engine.reply({ purpose: 'result', ticketId: blocked, text: 'x' })).toThrow(new UserError('notReady'))
+    h.engine.report(blocked, { state: 'blocked', summary: 'No access to the growth chat' })
+    expect(h.engine.reply({ purpose: 'result', ticketId: blocked, text: '查不了：FF 读不到增长群' })).toMatchObject({ reused: false })
+    expect(h.outbox.at(-1)).toMatchObject({ text: '查不了：FF 读不到增长群', kind: 'reply', ticketId: blocked })
+    const failed = accepted(h, '5', 't5').ticketId!
+    h.engine.report(failed, { state: 'failed', summary: 'The model call failed' })
+    expect(h.engine.reply({ purpose: 'result', ticketId: failed, text: '出错了，没做成' })).toMatchObject({ reused: false })
+    // A worker that is still at it, or one whose turn ended without a report, has nothing for the person yet.
+    const working = accepted(h, '6', 't6').ticketId!
+    h.engine.report(working, { state: 'progress', summary: 'Reading the chat' })
+    expect(() => h.engine.reply({ purpose: 'result', ticketId: working, text: 'x' })).toThrow(new UserError('notReady'))
+    h.engine.report(working, { state: 'waiting', summary: '' })
+    expect(() => h.engine.reply({ purpose: 'result', ticketId: working, text: 'x' })).toThrow(new UserError('notReady'))
+  })
   it('keeps an Eval\'s deadline on a repeated delivery, refuses to queue a held Trigger again, and puts expired Triggers first', () => {
     const h = harness()
     h.engine.receive(trigger('1')); h.pump()

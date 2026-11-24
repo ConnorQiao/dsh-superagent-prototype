@@ -204,6 +204,8 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 `sweep`, once a minute, unloads the worker Sessions that sat idle for `workerUnloadMinutes` with nothing to do, through `Sessions.unload` (see [003 Execution](003-execution.md)). It looks at the Sessions it saw created or go idle (`idleSince`). A launch or a delivery for a Ticket waits for an unload of its Session that runs, then loads it again through `Sessions.ensure`.
 
+The same sweep tells the main Session of an Assignment that has worked `longRunningMinutes` (an hour by default) without a ready, blocked or failed report, and again each time as long again (`longRunning`, `worker_long_running`): it reads the transcript to see whether the worker is stuck. A worker that is stuck, or blocked, or fails, reports what it ran into, and the reply gate lets the main Session tell the person who asked (`result` after a blocked or failed report of an explicit request); work taken up unasked under a rule has no one waiting, so it posts nothing then.
+
 Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
 
 `install` subscribes to Session events; `dispose` unsubscribes. A turn end normally reports waiting, except after readiness or while human action is required. Errors report failed. At startup, `resume` reports interrupted Assignments through `assignmentInterrupted` and requeues pending launches that do not wait for a person, oldest Ticket first.
@@ -336,7 +338,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/sessions.ts` | Sessions |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
-| `src/app/schedules.ts` | DSH scheduled tasks for the main Session: the guard on its schedule tools, and the trigger each delivered occurrence becomes |
+| `src/app/schedules.ts` | DSH scheduled tasks for the main Session: the guard on its schedule tools, and the trigger each delivered occurrence becomes unless a tool module delivers it (`reminded`) |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
 | `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
@@ -347,7 +349,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
-| `src/app/tools/extensions.ts` | The tools that `toolModules` add to Executor Sessions, and whose message each may act for |
+| `src/app/tools/extensions.ts` | The tools that `toolModules` add to Executor Sessions and the main Session, whose message each may act for, DSH's scheduled tasks for them (`mainSchedules`), and their `reminded` hook for occurrences |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -430,6 +432,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/schedules.spec.ts` | Scheduled tasks: reading delivered occurrences, the schedule tool guard, and the trigger an occurrence becomes |
+| `tests/long-running.spec.ts` | Long-running work: the main Session told of an Assignment that worked an hour without finishing, again an hour later, and no more once the worker reported |
 | `tests/memory.spec.ts` | What stays in memory: an idle Executor Session unloaded and loaded again for its Ticket's next message, what keeps one loaded, and the main Session moving to a new one after a compaction, with the summary, the undecided candidates and the scheduled tasks of the old one |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |

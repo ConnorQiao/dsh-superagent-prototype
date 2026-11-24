@@ -9,6 +9,7 @@ import { EnginePart } from './part.ts'
 /**
  * A message for a Channel, by purpose: an Executor's acknowledgement of a person's request it works on, the answer to a
  * person's question once the worker reported it, the result of a ticket that is `ready`, `completed`, `merged`, or `dropped`,
+ * or, when a person asked for it, whose worker reported it `blocked` or `failed` (what it ran into, for the person waiting),
  * the ticket's current `question` for a person (`attention`), or `progress`: how a live ticket is going, for a person whose
  * message about it reached it while its worker works. When `ticketId` is omitted, the ticket that `triggerId` reached is used.
  */
@@ -30,8 +31,9 @@ export class Replies extends EnginePart {
    * Queue a message for the Channel its purpose names: an acknowledgement or an answer goes where that person's message was
    * written, attention where the message that raised the question was (or to the ticket's starting conversation), and a
    * result to the conversation where the ticket started (`result` is allowed only for a ticket in `ready`, `completed`,
-   * `merged`, or `dropped`). Each message is queued at most once (idempotent). An acknowledgement, even one already queued,
-   * records that the ticket's worker took the message up.
+   * `merged`, or `dropped`, or one whose worker reported `blocked` or `failed`, so the person hears what it ran into instead
+   * of nothing). Each message is queued at most once (idempotent). An acknowledgement, even one already queued, records that
+   * the ticket's worker took the message up.
    * @throws UserError when the ticket or trigger is unknown or the purpose's rule refuses it, such as a result of a ticket
    * that is not ready, completed, merged, or dropped.
    */
@@ -88,7 +90,11 @@ export class Replies extends EnginePart {
       : trigger ? this.repo.tickets.list().find(item => this.reaches(item, trigger)) : undefined
     if (request.purpose === 'result') {
       const outcome = ticket && ticketOutcome(ticket)
-      const reported = !!ticket && liveTicket(ticket) && latestAssignment(ticket)?.report?.state === 'ready'
+      const report = ticket && liveTicket(ticket) ? latestAssignment(ticket)?.report?.state : undefined
+      // A worker that reported blocked or failed told the main Session what it ran into, which the person who asked hears; work
+      // taken up unasked under a rule has no one waiting for it.
+      const stuck = (report === 'blocked' || report === 'failed') && ticket?.mandate.strength === 'explicit'
+      const reported = report === 'ready' || stuck
       const ready = outcome === 'merged' || outcome === 'completed' || outcome === 'dropped' || reported
       if (!ticket || !ready) throw new UserError('notReady')
     }

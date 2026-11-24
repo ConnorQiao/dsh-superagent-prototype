@@ -24,6 +24,10 @@ export const Config = s.object({
     .description('Minutes an Executor Session stays loaded with nothing to do before it is unloaded from memory; it loads again from disk when its ticket gets work.').volatile(),
   toolModules: s.array(absolute('A module whose workerTools adds tools to every Executor Session, bound to its ticket.')).default([])
     .description('Modules that add tools to every Executor Session (docs/006-deployment.md); a change remounts the plugin.'),
+  dshScheduleTools: s.boolean().default(true)
+    .description('Whether the main Session gets DSH\'s schedule tools (schedule_create, schedule_list, schedule_view, schedule_edit). They read and change every task of the host for whoever asks, so a deployment whose tool module manages scheduled tasks turns them off; a change remounts the plugin.'),
+  longRunningMinutes: s.number().min(LIMITS.longRunningMinutes.min).max(LIMITS.longRunningMinutes.max).step(1).default(60)
+    .description('Minutes a worker may work on an assignment without finishing before the main Session is told, and again each time as long again, so it looks whether the work is stuck.').volatile(),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
@@ -35,6 +39,10 @@ export interface Machine {
   workerUnloadMinutes: Volatile<number>
   /** Modules that add tools to every Executor Session, each bound to its ticket (`src/app/tools/extensions.ts`). */
   toolModules: readonly string[]
+  /** Whether the main Session gets DSH's schedule tools (`schedules.ts`); off when a tool module manages scheduled tasks. */
+  dshScheduleTools: boolean
+  /** Minutes an assignment works before the main Session is told to look at it (`DshExecutor.longRunning`). */
+  longRunningMinutes: Volatile<number>
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
@@ -46,8 +54,9 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, workerUnloadMinutes } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, workerUnloadMinutes, toolModules: config.toolModules ?? [] }
+  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, workerUnloadMinutes, longRunningMinutes } = config
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, workerUnloadMinutes, toolModules: config.toolModules ?? [],
+    dshScheduleTools: config.dshScheduleTools ?? true, longRunningMinutes }
 }
 
 export const GithubAccountsSchema = z.object({

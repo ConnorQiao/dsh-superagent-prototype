@@ -41,13 +41,13 @@ import { Setup } from './setup.ts'
 import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions } from './sessions.ts'
-import { parseReminders, scheduledTrigger, taskOf } from './schedules.ts'
+import { parseReminders, scheduledTrigger, taskOf, type Reminder } from './schedules.ts'
 import { Settings } from './settings.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
 import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
-import { loadToolModules, type WorkerToolModule } from './tools/extensions.ts'
+import { loadToolModules, mainSchedules, mainToolContext, type MainSchedules, type WorkerToolModule } from './tools/extensions.ts'
 
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
@@ -103,6 +103,10 @@ export class Runtime extends Service implements SourceHost {
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
   /** The `toolModules`, imported in `initialize` before Sessions are decorated. */
   private readonly toolModules: WorkerToolModule[] = []
+  /** DSH's scheduled tasks for the tool modules (`mainSchedules`), read at each use: the schedule service starts after the plugin. */
+  private get schedules(): MainSchedules | undefined {
+    return mainSchedules(() => { try { return this.ctx.get('schedule' as never) } catch { return undefined } }, () => this.masterId)
+  }
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
@@ -142,7 +146,7 @@ export class Runtime extends Service implements SourceHost {
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'),
         mainHealth: board.claim('main-session', { state: 'ready', detail: 'No turn of the main Session has failed' }),
         get masterId() { return runtime.masterId },
-        reminded: text => { this.reminded(text) },
+        reminded: text => { this.reminded(text) }, scheduleTools: machine.dshScheduleTools,
         rotate: summary => { void this.rotateMain(summary) }, previousMasters: () => this.previousMasters(),
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
@@ -187,7 +191,8 @@ export class Runtime extends Service implements SourceHost {
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
-        get toolModules() { return runtime.toolModules }, warn: message => { ctx.logger.warn('dsh-superagent: %s', message) },
+        get toolModules() { return runtime.toolModules }, get schedules() { return runtime.schedules },
+        warn: message => { ctx.logger.warn('dsh-superagent: %s', message) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
@@ -220,11 +225,32 @@ export class Runtime extends Service implements SourceHost {
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
   /**
-   * A DSH scheduled task's occurrence reached the main Session: each one becomes a trigger from the person whose request
-   * created the task, on that request's threads (`schedules.ts`). A task whose request this host no longer knows is skipped.
+   * A DSH scheduled task's occurrence reached the main Session. A tool module that manages scheduled tasks delivers its own
+   * (`WorkerToolModule.reminded`); any other becomes a trigger from the person whose request created the task, on that
+   * request's threads (`schedules.ts`). A task whose request this host no longer knows is skipped.
    */
   private reminded(text: string): void {
-    for (const reminder of parseReminders(text)) {
+    const reminders = parseReminders(text)
+    if (reminders.length === 0) return
+    void this.remind(reminders).catch((error: unknown) => {
+      this.ctx.logger.warn('dsh-superagent: scheduled tasks were not delivered: %s', String(error))
+    })
+  }
+  /** Whether a tool module delivered the occurrence itself; one that throws is reported and the next module asked. */
+  private async moduleReminded(reminder: Reminder): Promise<boolean> {
+    for (const module of this.toolModules) {
+      if (typeof module.reminded !== 'function') continue
+      try {
+        if (await module.reminded({ ...reminder }, mainToolContext(this.store, this.schedules))) return true
+      } catch (error) {
+        this.ctx.logger.warn('dsh-superagent: a tool module could not deliver scheduled task %s: %s', reminder.scheduleId, String(error))
+      }
+    }
+    return false
+  }
+  private async remind(reminders: readonly Reminder[]): Promise<void> {
+    for (const reminder of reminders) {
+      if (this.closing() || await this.moduleReminded(reminder)) continue
       const { triggerId, instruction } = taskOf(reminder.prompt)
       const origin = triggerId ? this.store.triggers.get(triggerId) : undefined
       if (!origin?.human || !instruction) {
