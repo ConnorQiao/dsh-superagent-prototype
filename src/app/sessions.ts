@@ -13,7 +13,8 @@ import { AgentDelivery, messageId } from './delivery.ts'
 import type { Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
-import { initializeRoleModel } from './role-models.ts'
+import { initializeRoleModel, resolveRoleModel } from './role-models.ts'
+import type { RoleModel } from '../policy.ts'
 import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
@@ -175,6 +176,16 @@ export class Sessions {
   async delivery(name: string): Promise<'injected' | 'pending'> {
     await this.host.effects.idle('notice')
     return this.host.effects.pending('notice', name) ? 'pending' : 'injected'
+  }
+  /**
+   * Switches the running main Session to a newly saved orchestrator model, which otherwise only seeds a main Session created later;
+   * a manual selection made afterwards still wins until the next save. No-op before the main Session exists (`ensure` seeds it).
+   */
+  async applyRoleModel(model: RoleModel): Promise<void> {
+    const resolved = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
+    if ('error' in resolved) return
+    resolved.agent.model.select(await resolveRoleModel(this.ctx, model))
+    await this.ctx.sessionPersistence.flush()
   }
   /** Injects a notice into the main Session without waking it; no-op if the main Session does not exist yet. */
   private async inject(name: string, value: Record<string, unknown>, summary: string): Promise<void> {

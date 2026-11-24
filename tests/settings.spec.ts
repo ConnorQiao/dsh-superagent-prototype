@@ -15,6 +15,20 @@ function deferred<T>() {
 }
 const model = { provider: 'worker-provider', model: 'worker-model' }
 
+it('switches the running main Session to a saved orchestrator model, and leaves it alone when the model does not change', async () => {
+  h = await startRuntime()
+  const { settings, store, masterId } = h.runtime
+  const agents = (h.ctx as unknown as { agents: Map<string, { session: { append: ReturnType<typeof vi.fn> } }> }).agents
+  const append = agents.get(masterId)!.session.append
+  const selections = () => append.mock.calls.filter(([type]) => type === 'model/selection').map(([, value]) => value)
+  const before = selections().length
+  const fast = { ...model, reasoningEffort: 'low' }
+  await settings.save('eval', { ...store.settings().eval, model: fast }, store.blockRevision('eval'), 'panel')
+  expect(selections().slice(before)).toEqual([fast])
+  await settings.save('eval', { ...store.settings().eval, timeoutSeconds: 90, model: fast }, store.blockRevision('eval'), 'panel')
+  expect(selections().slice(before)).toEqual([fast])
+})
+
 it('refuses a save of a block that another save changed during its model or account check, and saves nothing of it', async () => {
   h = await startRuntime()
   const { settings, store } = h.runtime
