@@ -24,6 +24,11 @@ export interface TicketAsker {
 /** What a module's `workerTools` receives for one Executor Session. */
 export interface WorkerToolContext {
   readonly ticket: { readonly id: string; readonly title: string }
+  /**
+   * The Executor Session's working directory, where its commands run: the ticket's own directory, so a tool that writes a file
+   * for the Session puts it there. Undefined until the ticket has one.
+   */
+  readonly cwd: string | undefined
   /** The person whose message `triggerId` is, when it is a person's message that reached this ticket; throws otherwise. */
   asker(triggerId: string): TicketAsker
   /** The zod this bundle builds tool schemas with; a module's schemas must come from it. */
@@ -66,6 +71,7 @@ export function extensionTools(modules: readonly WorkerToolModule[], store: Pick
   if (modules.length === 0) return []
   const context: WorkerToolContext = {
     ticket: { id: ticket.id, title: ticket.title },
+    get cwd() { return (store.tickets.get(ticket.id) ?? ticket).execution?.directory || undefined },
     asker: triggerId => {
       // The ticket as it is now: follow-ups that reached it after the Session started count too.
       const current = store.tickets.get(ticket.id) ?? ticket

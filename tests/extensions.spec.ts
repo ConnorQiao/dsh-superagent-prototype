@@ -49,6 +49,11 @@ describe('tool modules', () => {
     ], [{ key: 'feishu:oc_a:om_root', subscriptions: ['t1'] } as unknown as Thread])
     extensionTools([module], store, ticket, new Set(), () => {})
     expect(context!.ticket).toEqual({ id: 't1', title: 'Look something up' })
+    // The working directory, read from the ticket as it is now.
+    expect(context!.cwd).toBeUndefined()
+    ;(ticket as { execution?: unknown }).execution = { name: 'look-up', directory: '/work/look-up-1', assignment: 'a1' }
+    expect(context!.cwd).toBe('/work/look-up-1')
+    delete (ticket as { execution?: unknown }).execution
     expect(context!.asker('feishu:om_root')).toMatchObject({ actor: 'ou_alice', source: 'feishu', addressed: 'mention', meta: { chatId: 'oc_a', messageId: 'om_root' } })
     // A follow-up on a thread the ticket is subscribed to is that ticket's too.
     expect(context!.asker('feishu:om_followup').actor).toBe('ou_bob')

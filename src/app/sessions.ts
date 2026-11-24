@@ -209,7 +209,8 @@ export class Sessions {
    */
   private compaction(event: { type: string; data: unknown }): void {
     const data = event.data as { summary?: unknown; error?: unknown } | undefined
-    if (event.type === 'compaction/summary' && typeof data?.summary === 'string' && data.summary.trim()) this.pendingSummary = data.summary
+    const summary = event.type === 'compaction/summary' ? summaryText(data?.summary) : ''
+    if (summary) this.pendingSummary = summary
     else if (event.type === 'compaction/end' && data?.error === undefined && this.pendingSummary !== undefined) {
       this.carried = this.pendingSummary; this.pendingSummary = undefined
       if (this.main.status === 'idle') this.rotateIfCompacted()
@@ -492,4 +493,17 @@ export class Sessions {
   }
   /** Releases prompt sections, skills, and tools registered by `Sessions` across all decorated agents. */
   dispose(): void { for (const agent of [...this.bindings.keys()]) this.release(agent) }
+}
+
+/**
+ * The text of a compaction summary: DSH 0.2.3 writes it as content parts (`[{ type: 'text', text }]`); a plain string is read
+ * too. Anything else reads as no summary, so the main Session stays.
+ */
+export function summaryText(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (!Array.isArray(value)) return ''
+  return value.map(part => {
+    const item = part as { type?: unknown; text?: unknown } | null
+    return item && item.type === 'text' && typeof item.text === 'string' ? item.text : ''
+  }).filter(Boolean).join('\n').trim()
 }

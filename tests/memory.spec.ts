@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 import { KV } from '../src/kv.ts'
 import { carriedContext, nextMasterId } from '../src/app/runtime.ts'
+import { summaryText } from '../src/app/sessions.ts'
 
 let h: Host | undefined
 afterEach(async () => { await h?.stop(); h = undefined })
@@ -75,8 +76,10 @@ it('moves the main Session to a new one that starts from its summary once its co
   h.runtime.receive(pending)
   await h.runtime.idle()
   expect(h.candidates()).toEqual([pending.id])
-  h.ctx.emit('session/event', sessionOf(h, from) as never, { type: 'compaction/summary', data: { summary: 'Alice asked about the release.' } } as never)
-  h.ctx.emit('session/event', sessionOf(h, from) as never, { type: 'compaction/end', data: {} } as never)
+  // DSH 0.2.3 writes the summary as content parts.
+  h.ctx.emit('session/event', sessionOf(h, from) as never,
+    { type: 'compaction/summary', data: { compactionId: 'c1', summary: [{ type: 'text', text: 'Alice asked about the release.' }] } } as never)
+  h.ctx.emit('session/event', sessionOf(h, from) as never, { type: 'compaction/end', data: { compactionId: 'c1', turn: 3 } } as never)
   // It moves only once its turn ended.
   await settle()
   expect(h.runtime.masterId).toBe(from)
@@ -155,4 +158,12 @@ it('lets the main Session reach a ticket whose worker Session was unloaded: what
   await h.runtime.idle(); await settle()
   expect(h.agents.has(sessionId)).toBe(true)
   expect(delivered('刚才那个回归查到哪一步了')).toBe(true)
+})
+
+it('reads a compaction summary written as content parts or as a string', () => {
+  expect(summaryText([{ type: 'text', text: '## Requests\n- one' }, { type: 'image', data: 'x' }, { type: 'text', text: '- two' }]))
+    .toBe('## Requests\n- one\n- two')
+  expect(summaryText('  plain  ')).toBe('plain')
+  expect(summaryText(undefined)).toBe('')
+  expect(summaryText([{ type: 'text', text: '   ' }])).toBe('')
 })
