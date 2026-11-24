@@ -1530,6 +1530,22 @@ it('reports a failed turn of the main Session in health and the overview until a
   expect(overviewOf(runtime).problems).not.toContainEqual(expect.objectContaining({ name: 'main-session' }))
 })
 
+it('reports in GET state whether the main Session is in a turn since when, and the tool call it still waits on', async () => {
+  const ctx = (runtime as unknown as { ctx: Context }).ctx
+  const master = agents.get(runtime.masterId)!
+  const session = (master as unknown as { session: unknown }).session
+  const event = (type: string, data: unknown) => ctx.emit('session/event', session as never, { type, seq: 1, time: Date.now(), data } as never)
+  expect((await api('GET', 'state')).body).toMatchObject({ main: { status: 'idle', since: expect.any(String) } })
+  ctx.emit('agent/status', { agent: master, status: 'running' } as never)
+  event('tool/call', { callId: 'c1', name: 'bash', arguments: '{}' })
+  event('tool/call', { callId: 'c2', name: 'orchestrator_read', arguments: '{}' })
+  event('tool/result', { message: { toolCallId: 'c2' } })
+  const running = (await api('GET', 'state')).body as { main: { status: string; tool?: { name: string } } }
+  expect(running.main).toMatchObject({ status: 'running', tool: { name: 'bash', since: expect.any(String) } })
+  ctx.emit('agent/status', { agent: master, status: 'idle' } as never)
+  expect(((await api('GET', 'state')).body as { main: unknown }).main).toEqual({ status: 'idle', since: expect.any(String) })
+})
+
 it('refuses the main Session a bash command that runs sleep and a long job wait, as reports arrive by themselves, and no worker', async () => {
   const bash = (command: string) => ({ name: 'bash', arguments: { command, description: 'x' } })
   const main = guards.get(runtime.masterId)!

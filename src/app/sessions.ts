@@ -104,6 +104,8 @@ export class Sessions {
   private readonly ctx: Context
   /** Whether the main Session's current run of turns failed: set by its `agent/error`, cleared when it starts again. */
   private mainFailing = false
+  /** What the main Session is doing (`agent/status`) since when, and the tool calls it is waiting on, by call id. */
+  private readonly main = { status: 'idle', since: new Date().toISOString(), calls: new Map<string, { name: string; since: string }>() }
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
@@ -125,6 +127,7 @@ export class Sessions {
       if (!agent || !binding || binding.subagent) return
       this.retryHealth.observe(agent.id, event)
       this.updateModelHealth()
+      if (agent.id === this.host.masterId) this.mainEvent(event)
     })
     ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
     // Opening a Session in DSH's Web UI before its first turn may select the default preset for it: select ours again. After
@@ -149,8 +152,24 @@ export class Sessions {
       this.host.mainHealth?.set({ state: 'error', detail: `A turn of the main Session failed: ${text}`, at: new Date().toISOString() })
     })
   }
+  /**
+   * The main Session's activity for `GET state`: idle or running since when, and the oldest tool call it is still waiting on.
+   * A main Session stuck in one turn judges nothing and raises no error, so only this shows it.
+   */
+  mainActivity(): { status: string; since: string; tool?: { name: string; since: string } } {
+    const oldest = [...this.main.calls.values()].sort((a, b) => a.since.localeCompare(b.since))[0]
+    return { status: this.main.status, since: this.main.since, ...oldest ? { tool: { ...oldest } } : {} }
+  }
+  private mainEvent(event: { type: string; data: unknown }): void {
+    const data = event.data as { name?: unknown; callId?: unknown; message?: { toolCallId?: unknown } } | undefined
+    if (event.type === 'tool/call' && data?.callId !== undefined)
+      this.main.calls.set(String(data.callId), { name: String(data.name ?? 'unknown'), since: new Date().toISOString() })
+    else if (event.type === 'tool/result' && data?.message?.toolCallId !== undefined) this.main.calls.delete(String(data.message.toolCallId))
+  }
   /** Clear the main Session's failure once one of its turns ends without failing (a run starts afresh on each wake). */
   private mainStatus(status: string): void {
+    if (status !== this.main.status) Object.assign(this.main, { status, since: new Date().toISOString() })
+    if (status !== 'running') this.main.calls.clear()
     if (status === 'running') { this.mainFailing = false; return }
     if (status !== 'idle' || this.mainFailing || this.host.closing()) return
     if (this.host.mainHealth?.get()?.state === 'error')
