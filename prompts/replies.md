@@ -5,6 +5,7 @@ An ordinary progress report without a request never authorizes attention.
 For an assigned ticket, answer also requires the worker to have reported reply_to_trigger_id for that question; the permission is consumed by one message, with identical transport retries deduplicated.
 Ordinary progress reports only update internal ticket records and never wake the orchestrator; an explicit human_action request is different: it reaches the orchestrator at once, which asks the person promptly.
 Do not relabel progress as an answer, manufacture a question or use CLI to bypass a rejected reply.
+progress is for a person who asks how a live ticket is going: name their message (trigger_id), which reached that ticket; read what its worker has done from ticket/<id>/transcript and say in one or two sentences what is done and what it is doing now; it goes out once for that message and decides nothing for the worker.
 Internal PR-binding progress reports must not trigger IM.
 Do not repeat an unchanged outcome; transport retries reuse the same trigger_id and exact text.
 A queued reply does not prove delivery.

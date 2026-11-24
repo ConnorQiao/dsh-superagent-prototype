@@ -9,10 +9,12 @@ import { EnginePart } from './part.ts'
 /**
  * A message for a Channel, by purpose: an Executor's acknowledgement of a person's request it works on, the answer to a
  * person's question once the worker reported it, the result of a ticket that is `ready`, `completed`, `merged`, or `dropped`,
- * or the ticket's current `question` for a person (`attention`). When `ticketId` is omitted, the ticket that `triggerId` reached is used.
+ * the ticket's current `question` for a person (`attention`), or `progress`: how a live ticket is going, for a person whose
+ * message about it reached it while its worker works. When `ticketId` is omitted, the ticket that `triggerId` reached is used.
  */
 export type ReplyRequest =
   | { purpose: 'acknowledgement'; ticketId: string; triggerId: string; text: string }
+  | { purpose: 'progress'; ticketId?: string; triggerId: string; text: string }
   | { purpose: 'answer' | 'result' | 'attention'; ticketId?: string; triggerId?: string; question?: string; text: string }
 /** A queued message: its id, whether it went out, and whether an earlier request had queued it already. */
 export interface Reply { id: string; status: ReplyStatus; reused: boolean }
@@ -34,7 +36,9 @@ export class Replies extends EnginePart {
    * that is not ready, completed, merged, or dropped.
    */
   reply(request: ReplyRequest): Reply {
-    return request.purpose === 'acknowledgement' ? this.acknowledge(request) : this.answer(request)
+    if (request.purpose === 'acknowledgement') return this.acknowledge(request)
+    if (request.purpose === 'progress') return this.progress(request)
+    return this.answer(request)
   }
   /**
    * Queue the acknowledgement an accept carries where the message that started the ticket was written, if it has a Channel
@@ -61,7 +65,23 @@ export class Replies extends EnginePart {
     this.takeUp(ticket.id, trigger.id)
     return { id, status: this.options.outbox.status(id) ?? 'pending', reused: existing !== undefined }
   }
-  private answer(request: Exclude<ReplyRequest, { purpose: 'acknowledgement' }>): Reply {
+  /**
+   * Tell a person how a live ticket is going: their message must have reached that ticket, and it goes out at most once for
+   * that message. It decides nothing for the worker, which still handles whatever else the message asks.
+   */
+  private progress(request: Extract<ReplyRequest, { purpose: 'progress' }>): Reply {
+    const trigger = this.repo.triggers.get(request.triggerId)
+    if (!trigger) throw new UserError('unknownTrigger')
+    if (!trigger.human) throw new UserError('notQuestion')
+    const ticket = request.ticketId ? this.require(request.ticketId) : this.repo.tickets.list().find(item => this.reaches(item, trigger))
+    if (!ticket || !liveTicket(ticket) || !this.reaches(ticket, trigger)) throw new UserError('notWorking')
+    if (!trigger.channel) throw new UserError('noChannel')
+    const id = key('progress', trigger.id)
+    const existing = this.options.outbox.status(id)
+    if (!existing) this.options.outbox.send({ id, channel: trigger.channel, text: request.text, kind: 'reply', ticketId: ticket.id })
+    return { id, status: this.options.outbox.status(id) ?? 'pending', reused: existing !== undefined }
+  }
+  private answer(request: Exclude<ReplyRequest, { purpose: 'acknowledgement' | 'progress' }>): Reply {
     const trigger = request.triggerId ? this.repo.triggers.get(request.triggerId) : undefined
     if (request.triggerId && !trigger) throw new UserError('unknownTrigger')
     const ticket = request.ticketId ? this.require(request.ticketId)

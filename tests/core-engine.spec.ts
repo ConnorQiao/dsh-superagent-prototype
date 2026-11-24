@@ -1023,6 +1023,24 @@ describe('replies', () => {
     h.engine.stopTicket(ticketId)
     expect(() => h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '2', text: 'x' })).toThrow(new UserError('ackEnded'))
   })
+  it('tells a person how a live ticket is going, once for their message, and refuses messages that reached no live ticket', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    const asked = trigger('2', { actor: guest, channel: { source: 'chat', thread: 't1', address: { message: '2' } } })
+    h.engine.receive(asked)
+    expect(h.engine.reply({ purpose: 'progress', triggerId: '2', text: 'Read 8 of 12 chats' }))
+      .toEqual({ id: key('progress', '2'), status: 'pending', reused: false })
+    expect(h.outbox.at(-1)).toMatchObject({ channel: asked.channel, text: 'Read 8 of 12 chats', kind: 'reply', ticketId })
+    // Once for that message; it decides nothing, so the worker still owns the message.
+    expect(h.engine.reply({ purpose: 'progress', triggerId: '2', text: 'again' })).toMatchObject({ reused: true })
+    expect(h.outbox.filter(message => message.text === 'again')).toEqual([])
+    h.engine.receive(trigger('3', { human: false }))
+    expect(() => h.engine.reply({ purpose: 'progress', triggerId: '3', text: 'x' })).toThrow(new UserError('notQuestion'))
+    h.engine.receive(trigger('6', { threads: [{ source: 'chat', id: 'elsewhere' }] }))
+    expect(() => h.engine.reply({ purpose: 'progress', triggerId: '6', text: 'x' })).toThrow(new UserError('notWorking'))
+    h.engine.stopTicket(ticketId)
+    expect(() => h.engine.reply({ purpose: 'progress', triggerId: '2', ticketId, text: 'x' })).toThrow(new UserError('notWorking'))
+  })
   it('sends an answer only after the worker reported it, a result only for a ready ticket, and attention only for its current question', () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!
