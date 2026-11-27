@@ -17,12 +17,17 @@
     # web search, and forked subagents, which would run under this preset; spawned subagents run under `standard`, whose shell moves a
     # command to a background job only after 60 seconds, as a subagent's jobs are killed when it ends. A preset row has no
     # setting that hides it from the preset picker, so its name and description say whom it is for.
+    #
+    # A deployment whose commands are mostly slow API calls sets the two waits in DSH's environment, in milliseconds up to
+    # 600000: DSH_SUPERAGENT_WORKER_FOREGROUND_MS (how long a command runs in the foreground) and DSH_SUPERAGENT_WORKER_JOB_WAIT_MS
+    # (the longest job wait). A short wait makes a worker spend a model step on every check of a running job; a long one makes
+    # a person's message wait for the command or the job wait in progress, which superagent's relays do not cut short.
     - id: dsh-superagent-worker-preset
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: dsh-superagent-worker
         name: dsh-superagent 执行器
-        description: dsh-superagent 的执行器 Session 专用，不供手动选择。前台命令超 5 秒转入后台，只含执行工作所需的工具。
+        description: dsh-superagent 的执行器 Session 专用，不供手动选择。前台命令超时转入后台（默认 5 秒），只含执行工作所需的工具。
         order: 90
         plugins:
           - id: persona
@@ -35,7 +40,8 @@
               maxBytes: 65536
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'
-          # A foreground command waits at most 5 s, then the shell tool moves it to a background job.
+          # A foreground command waits at most DSH_SUPERAGENT_WORKER_FOREGROUND_MS (5 s when unset or out of range), then the shell
+          # tool moves it to a background job.
           - id: shell
             name: cordis:group
             group: true
@@ -46,14 +52,14 @@
                 name: '@deepseek-ai/dsh-bash-sandbox'
                 disabled: !!js process.platform === 'win32'
                 config:
-                  timeoutMs: 5000
-                  maxTimeoutMs: 5000
+                  timeoutMs: !!js "(ms => ms >= 1000 && ms <= 600000 ? ms : 5000)(Number(process.env.DSH_SUPERAGENT_WORKER_FOREGROUND_MS))"
+                  maxTimeoutMs: !!js "(ms => ms >= 1000 && ms <= 600000 ? ms : 5000)(Number(process.env.DSH_SUPERAGENT_WORKER_FOREGROUND_MS))"
               - id: pwsh-sandbox
                 name: '@deepseek-ai/dsh-pwsh-sandbox'
                 disabled: !!js process.platform !== 'win32'
                 config:
-                  timeoutMs: 5000
-                  maxTimeoutMs: 5000
+                  timeoutMs: !!js "(ms => ms >= 1000 && ms <= 600000 ? ms : 5000)(Number(process.env.DSH_SUPERAGENT_WORKER_FOREGROUND_MS))"
+                  maxTimeoutMs: !!js "(ms => ms >= 1000 && ms <= 600000 ? ms : 5000)(Number(process.env.DSH_SUPERAGENT_WORKER_FOREGROUND_MS))"
               - id: tool-bash
                 name: '@deepseek-ai/dsh-tool-bash'
                 disabled: !!js process.platform === 'win32'
@@ -66,12 +72,13 @@
             name: '@deepseek-ai/dsh-tool-fs-search'
             config:
               sampleOverCapGlobResults: false
-          # A wait for a job ends after 5 s too; the job's end wakes the worker with its result.
+          # A wait for a job ends after DSH_SUPERAGENT_WORKER_JOB_WAIT_MS (5 s when unset or out of range); the job's end wakes the
+          # worker with its result.
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
             config:
-              waitTimeoutMs: 5000
-              maxWaitTimeoutMs: 5000
+              waitTimeoutMs: !!js "(ms => ms >= 1000 && ms <= 600000 ? ms : 5000)(Number(process.env.DSH_SUPERAGENT_WORKER_JOB_WAIT_MS))"
+              maxWaitTimeoutMs: !!js "(ms => ms >= 1000 && ms <= 600000 ? ms : 5000)(Number(process.env.DSH_SUPERAGENT_WORKER_JOB_WAIT_MS))"
           - id: skill-filesystem
             name: '@deepseek-ai/dsh-skill-filesystem'
           - id: tool-skill
@@ -120,7 +127,7 @@
             config:
               search: false
               fetch: true
-    # The agent preset of the main Session (ROUTER_PRESET in src/app/sessions.ts). The worker's 5-second shell and job waits, so a command or a wait does not hold back the next candidates, and
+    # The agent preset of the main Session (ROUTER_PRESET in src/app/sessions.ts). 5-second shell and job waits whatever the worker's are, so a command or a wait does not hold back the next candidates, and
     # only what the main Session uses, with web_fetch so it can answer a quick lookup itself and DSH's scheduled tasks: no
     # subagents, DSH's own web search, file search or writes, todo list, questions to a person, presenting, plan mode, plugin
     # manager, goals or workflows. No persona: the main Session's prompt is complete, so it has

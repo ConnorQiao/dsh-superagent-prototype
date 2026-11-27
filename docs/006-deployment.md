@@ -249,7 +249,7 @@ A database migrated by a newer version cannot be opened by an older one. Rollbac
 
 ### Agent presets
 
-The worker and router presets move shell commands to the background after 5 seconds. A Session cannot load without its preset. Keep the `dsh-superagent-worker` and `dsh-superagent-router` rows in `cordis.patch.yml` while their Sessions are in use; otherwise resume fails with `agent-preset/not-found`.
+The worker and router presets move shell commands to the background after 5 seconds, and end a wait for a background job after 5 seconds. A deployment whose workers mostly run slow API calls can lengthen the worker's two waits in DSH's environment, in milliseconds from 1000 to 600000: `DSH_SUPERAGENT_WORKER_FOREGROUND_MS` and `DSH_SUPERAGENT_WORKER_JOB_WAIT_MS`. With 5 seconds, a worker spends a model step on every check of a command that runs longer; with a longer wait, a message for a busy worker waits for the command or the job wait in progress, as superagent's relays do not end either early. The router preset keeps 5 seconds. A Session cannot load without its preset. Keep the `dsh-superagent-worker` and `dsh-superagent-router` rows in `cordis.patch.yml` while their Sessions are in use; otherwise resume fails with `agent-preset/not-found`.
 
 ## Troubleshooting
 
