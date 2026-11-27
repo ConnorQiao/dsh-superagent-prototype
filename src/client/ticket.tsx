@@ -9,6 +9,7 @@ import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
 import { ActionLink, ConfirmButton, ExternalLink, Hint, KeyValues, LabelValue, LoadState, MarkdownLite, PageHead, Section, SessionButton,
   StageMark, When } from './widgets.tsx'
+import { WorkTimeline } from './work.tsx'
 
 type Input = TicketPageView['inputs'][number]
 function InputLine({ input, earlier = [] }: { input: Input; earlier?: { id: string; at: string; preview: string }[] }) {
@@ -66,7 +67,7 @@ function Assignments({ ticket }: { ticket: TicketPageView }) {
   </li>)}</ul>
 }
 function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: string }) {
-  const { t, navigate } = usePanel()
+  const { t, navigate, readOnly } = usePanel()
   const { mandate, decision } = ticket
   const fact = (item: TicketPageView['basis']['facts'][number]): string => {
     if (item.name === 'legacyAuthority') return valueLabel(t, 'legacy', item.value)
@@ -96,8 +97,9 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
           { evidence: direction.evidence })}</Hint>}
     </div>],
   ] : []
-  const version = <button type="button" className="dt-textlink dt-mono" onClick={() => navigate(settingsRoute('eval',
-    { version: mandate.policyVersion }))}>{mandate.policyVersion.slice(0, 8)}</button>
+  const version = readOnly ? <span className="dt-mono">{mandate.policyVersion.slice(0, 8)}</span> : <button type="button"
+    className="dt-textlink dt-mono" onClick={() => navigate(settingsRoute('eval', { version: mandate.policyVersion }))}>
+    {mandate.policyVersion.slice(0, 8)}</button>
   return <Section title={t('mandateDetails')} icon="shield">
     <KeyValues rows={[...rows, [t('term.scope'), legacy ? t('legacyScopeShort') : mandate.scope || t('empty')],
       ...facts.map((item): [string, string] => [valueLabel(t, 'basis', item.name), fact(item)]),
@@ -154,6 +156,7 @@ export function TicketPage({ id }: { id: string }) {
       <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
     </p>}
     <MandateDetails ticket={data} actor={actor} />
+    {data.sessionId && <WorkTimeline id={data.id} live={data.stage === 'working'} createdAt={data.createdAt} />}
     {undelivered.length > 0 && <Section title={t('undeliveredInputs')} count={undelivered.length}>
       <Hint>{data.deliveryError ? t('inputRetryHint') : data.paused ? t('inputPausedHint') : t('inputWaitingHint')}</Hint>
       <InputList inputs={undelivered} />

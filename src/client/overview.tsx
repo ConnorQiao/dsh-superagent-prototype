@@ -9,16 +9,19 @@ import { healthText, localized, reasonLabel, valueLabel, readableMarkers } from 
 import { CheckSetupButton, ConfirmButton, Hint, LoadState, Section, SetupMessage } from './widgets.tsx'
 
 function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () => Promise<void> }) {
-  const { t, call, navigate } = usePanel()
+  const { t, call, navigate, readOnly } = usePanel()
   const post = useAction((request: () => Promise<unknown>) => request(), { reload: onChanged })
-  const row = (title: string, detail: ReactNode, route: Route | undefined, hint?: string, actions?: ReactNode) => <li
-    className="dt-row dt-link dt-att dt-att-error">
-    <div className="dt-row-main">
-      <div className="dt-att-what">{route ? <button type="button" className="dt-open dt-open-wrap"
-        onClick={() => navigate(route)}>{title}</button> : title}</div>
-      {detail}{hint && <Hint>{hint}</Hint>}{actions && <div className="dt-row-meta dt-row-buttons">{actions}</div>}
-    </div>
-  </li>
+  const row = (title: string, detail: ReactNode, target: Route | undefined, hint?: string, given?: ReactNode) => {
+    // A read-only panel has no Settings to send a problem's fix to, and takes no action on it.
+    const route = readOnly && target?.page === 'settings' ? undefined : target, actions = readOnly ? undefined : given
+    return <li className="dt-row dt-link dt-att dt-att-error">
+      <div className="dt-row-main">
+        <div className="dt-att-what">{route ? <button type="button" className="dt-open dt-open-wrap"
+          onClick={() => navigate(route)}>{title}</button> : title}</div>
+        {detail}{hint && <Hint>{hint}</Hint>}{actions && <div className="dt-row-meta dt-row-buttons">{actions}</div>}
+      </div>
+    </li>
+  }
   const go = (label: string, route: Route) => <Button variant="outline" size="sm" icon={<Icon name="settings"
     size={14} />} onClick={() => navigate(route)}>{label}</Button>
   const raw = (text: string | undefined) => text && <p className="dt-error dt-clamp dt-mono">{text}</p>

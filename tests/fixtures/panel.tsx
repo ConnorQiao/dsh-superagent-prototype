@@ -2,6 +2,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { expect, vi } from 'vitest'
+import type { ApiOptions } from '../../src/client/api.ts'
 import { App } from '../../src/client/app.tsx'
 import { usePageForm } from '../../src/client/deployment.tsx'
 import { zh } from '../../src/client/locales.ts'
@@ -15,8 +16,8 @@ export const translator = (dictionary: Record<string, string>): T => ((key: stri
   const template = dictionary[key] ?? key
   return params ? template.replace(/\{(\w+)\}/g, (match, name: string) => name in params ? String(params[name]) : match) : template
 }) as T
-function Panel({ t }: { t: T }) {
-  return <App t={t} openSession={async id => { server.opened.push(id) }} deploymentForm={usePageForm(server.form)} />
+function Panel({ t, api }: { t: T; api?: ApiOptions }) {
+  return <App t={t} openSession={async id => { server.opened.push(id) }} deploymentForm={usePageForm(server.form)} {...api ? { api } : {}} />
 }
 let root: Root | undefined
 let container: HTMLElement | undefined
@@ -35,10 +36,10 @@ export async function settle() {
   })
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
-export async function mount(dictionary: Record<string, string> = zh) {
+export async function mount(dictionary: Record<string, string> = zh, api?: ApiOptions) {
   container = document.createElement('div'); document.body.append(container)
   root = createRoot(container)
-  await act(async () => { root!.render(<Panel t={translator(dictionary)} />) })
+  await act(async () => { root!.render(<Panel t={translator(dictionary)} {...api ? { api } : {}} />) })
   await settle()
 }
 export async function remount(dictionary: Record<string, string> = zh) { unmount(); await mount(dictionary) }

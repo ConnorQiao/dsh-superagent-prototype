@@ -115,12 +115,12 @@ const triggerLine = (trigger: Trigger) => ({ trigger_id: trigger.id, actor: trig
  * Every event of a ticket's worker Session, oldest first. DSH serves history in message-aligned pages from the end of the log, so
  * this reads back to the start under the first page's cut, which events appended meanwhile cannot shift.
  */
-async function transcript(host: ResourceHost, ticketId: string, signal = new AbortController().signal): Promise<SessionEvent[]> {
+export async function workerEvents(context: Context, ticketId: string, signal = new AbortController().signal): Promise<SessionEvent[]> {
   const address = { kind: 'session', sessionId: workerSessionId(ticketId) as SessionId } as const
   const pages: SessionEvent[][] = []
   let window: { throughSeq: number; beforeSeq: number } | undefined
   for (;;) {
-    const page = await host.context.sessionController.events({ address, ...window }, signal)
+    const page = await context.sessionController.events({ address, ...window }, signal)
     // A history record carries the Session's own event envelope.
     const events = page.records.map(record => record.event as unknown as SessionEvent)
     pages.unshift(events)
@@ -283,7 +283,7 @@ const ROUTES: readonly Route[] = [
       if (message === undefined) throw new Error('Unknown ticket input')
       body = message
     } else if (section === 'message' && part && /^\d+$/.test(part)) {
-      const event = (await transcript(host, id, signal))[Number(part)]
+      const event = (await workerEvents(host.context, id, signal))[Number(part)]
       const entry = event && transcriptEntry(event)
       if (!entry) throw new Error('Unknown transcript entry')
       body = JSON.stringify(entry)
@@ -295,7 +295,7 @@ const ROUTES: readonly Route[] = [
     else if (section === 'assignment') body = ticket.execution?.assignment ?? ''
     else if (section === 'result') body = latestReport(ticket)?.summary ?? ''
     else if (section === 'transcript') {
-      body = (await transcript(host, id, signal)).flatMap((event, index) => {
+      body = (await workerEvents(host.context, id, signal)).flatMap((event, index) => {
         const entry = transcriptEntry(event)
         const said = entry?.message.content.map(block => block.type === 'text' ? block.text : `[${block.type}]`).join(' ') ?? ''
         return entry ? [{ type: entry.type, preview: preview(said).slice(0, 80), chars: JSON.stringify(entry).length,

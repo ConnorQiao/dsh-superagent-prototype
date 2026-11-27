@@ -93,7 +93,7 @@ function DroppedReplies({ items }: { items: DroppedReply[] }) {
   </DisclosureRow>
 }
 function SourceRow({ source }: { source: SourceStatusRow }) {
-  const { t, navigate } = usePanel()
+  const { t, navigate, readOnly } = usePanel()
   const { setup } = usePanelData()
   const [filteredOpen, setFilteredOpen] = useState(false)
   const { problem, dropped } = source
@@ -113,10 +113,10 @@ function SourceRow({ source }: { source: SourceStatusRow }) {
         {lastAt && <LabelValue label={t('sourceLatestLabel')} value={when(lastAt, t('lang'))} />}
       </div>
       {problem && <p className="dt-error">
-        <SetupMessage problem={problem} lead /> <button type="button" className="dt-textlink"
+        <SetupMessage problem={problem} lead /> {!readOnly && <button type="button" className="dt-textlink"
           onClick={() => navigate(settingsRoute('source', { source: source.id }))}>
           {t('sourceOpenSettings')}
-        </button>
+        </button>}
       </p>}
       {notes.map(item => <p key={item.name} className={item.state === 'error' ? 'dt-error dt-clamp' : 'dt-hint dt-clamp'}>
         {valueLabel(t, 'health', item.name)}{t('labelSeparator')}<span className={item.code ? undefined : 'dt-mono'}>{healthText(t,

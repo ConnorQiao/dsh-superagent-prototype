@@ -11,4 +11,8 @@ export default defineConfig([
   { entry: { client: 'src/client/index.tsx' }, outDir: 'lib', format: 'cjs', platform: 'browser', dts: false, clean: false, plugins: [raw],
     deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom'] },
     outputOptions: { entryFileNames: 'client.js', banner: 'window.__ModuleLoader__.load({ id: "dsh-superagent", factory: (require) => {', footer: 'return module.exports; } });', intro: 'var module = { exports: {} }; var exports = module.exports;' } },
+  // The panel outside DeepSeek Harness (`src/client/standalone.tsx`): one script with React in it, for a page that has neither DSH nor React.
+  { entry: { standalone: 'src/client/standalone.tsx' }, outDir: 'lib', format: 'iife', platform: 'browser', dts: false, clean: false, plugins: [raw],
+    minify: true, define: { 'process.env.NODE_ENV': '"production"' }, deps: { alwaysBundle: [/^react(-dom)?(\/|$)/, 'scheduler'] },
+    outputOptions: { entryFileNames: 'standalone.js' } },
 ])

@@ -106,7 +106,7 @@ function useThreadTimeline(key: string, target: string | undefined) {
   return { data, error, reload, earlier }
 }
 export function ThreadPage({ id, target }: { id: string; target?: string }) {
-  const { t, call, navigate, notify } = usePanel()
+  const { t, call, navigate, notify, readOnly } = usePanel()
   const [decisionsOpen, setDecisionsOpen] = useState(false)
   const { data, error, reload, earlier } = useThreadTimeline(id, target)
   const requeue = useAction(async (trigger: string) => {
@@ -157,7 +157,7 @@ export function ThreadPage({ id, target }: { id: string; target?: string }) {
       {data.timeline.length ? <ol className="dt-timeline">{automatedRuns(data.timeline.slice().reverse(), sender).map(({ item,
         earlier: folded }) =>
         <TriggerItem key={item.id} trigger={item} earlier={folded} target={target} subscribed={subscribed}
-          requeue={item.actions.requeue ? { busy: requeue.busy, run: () => { void requeue.run(item.id) } } : undefined} />)}</ol>
+          requeue={item.actions.requeue && !readOnly ? { busy: requeue.busy, run: () => { void requeue.run(item.id) } } : undefined} />)}</ol>
             : <Hint>{t('noTriggers')}</Hint>}
       {data.earlier && <div>
         <Button variant="outline" size="sm" icon={<Icon name="chevron-down"

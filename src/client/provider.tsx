@@ -1,7 +1,7 @@
 /** Shared panel React contexts, state polling, restart detection, and action runner hook. */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { caller, usePoll, type ApiMessages, type Call, type SetupView, type StateView } from './api.ts'
+import { caller, usePoll, type ApiMessages, type ApiOptions, type Call, type SetupView, type StateView } from './api.ts'
 import type { Route } from './route.ts'
 import STYLES from './client.css?raw'
 import { errorText, setupText, valueLabel, type T } from './text.ts'
@@ -15,6 +15,11 @@ export interface PanelContext {
   openSession: (sessionId: string) => Promise<void>
   notify: (text: string) => void
   restart: () => void
+  /**
+   * The panel only shows: no action that changes the Host (retry, stop, pause, requeue, settings), no link into Settings and
+   * no Session to open, since a read-only page has neither DSH's Session view nor a right to change anything.
+   */
+  readOnly: boolean
 }
 export interface PanelData {
   state: StateView | undefined
@@ -56,7 +61,7 @@ export function useAction<A extends unknown[]>(action: (...args: A) => Promise<u
 }
 
 const messages = (t: T): ApiMessages => ({
-  offline: t('offline'), notRunning: t('hostNotRunning'), serverError: status => t('serverError', { status }),
+  offline: t('offline'), notRunning: t('hostNotRunning'), readOnly: t('readOnlyRefused'), serverError: status => t('serverError', { status }),
     requestFailed: status => t('requestFailed', { status }),
   setup: problem => problem.values.output ? `${setupText(t, problem)}\n${problem.values.output}` : setupText(t, problem),
   // A refusal names a prompt part by its label.
@@ -71,15 +76,20 @@ function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => vo
 }
 const stay = () => {}
 const noSession = async () => {}
-export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', children }: {
+export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', api = {},
+  children }: {
   t: T; interval?: number; openSession?: (sessionId: string) => Promise<void>; navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
+  /** Where and how the panel reaches the management API, and whether it is read-only (`ApiOptions`); read once, at mount. */
+  api?: ApiOptions
   children: ReactNode
 }) {
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
-  const call = useMemo(() => caller(() => messages(copy.current)), [])
+  const options = useRef(api).current
+  const readOnly = !!options.readOnly
+  const call = useMemo(() => caller(() => messages(copy.current), options), [options])
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.
@@ -96,8 +106,8 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
     const timer = setTimeout(() => setRestarting(undefined), 30_000)
     return () => clearTimeout(timer)
   }, [restarting])
-  const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, notify, restart }), [t, call, navigate, back, backLabel,
-    openSession, notify, restart])
+  const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, notify, restart, readOnly }), [t, call, navigate, back,
+    backLabel, openSession, notify, restart, readOnly])
   const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts }), [state, error,
     reload, restarts])
   return <Panel.Provider value={context}><PanelState.Provider value={data}>

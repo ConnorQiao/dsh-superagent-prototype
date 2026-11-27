@@ -24,17 +24,29 @@ export class ApiError extends Error {
 }
 export interface ApiMessages {
   offline: string; notRunning: string; serverError: (status: number) => string; requestFailed: (status: number) => string
+  /** Refusal of a change while the panel is read-only (`ApiOptions.readOnly`). */
+  readOnly: string
   setup: (problem: SetupProblem) => string
   user: (failure: UserFailure) => string
 }
 const isUserError = (code: unknown): code is UserErrorCode => typeof code === 'string' && Object.hasOwn(USER_ERRORS, code)
 
+/**
+ * Where the panel reaches the management API and how. DSH serves it at `/orchestrator/api/`; a page that embeds the panel
+ * elsewhere passes the path it proxies the API under, its own `fetch` (for example one that sends an expired sign-in back
+ * through that page's login), and `readOnly`, which refuses every request but a `GET` before it leaves the browser.
+ */
+export interface ApiOptions { base?: string; fetch?: typeof fetch; readOnly?: boolean }
+export const DEFAULT_API_BASE = '/orchestrator/api/'
 /** Calls one management endpoint; the `x-orchestrator-request` header marks the request as originating from this page. */
-async function api<T>(messages: ApiMessages, path: string, method: string, body?: unknown): Promise<T> {
+async function api<T>(messages: ApiMessages, path: string, method: string, body?: unknown, options: ApiOptions = {}): Promise<T> {
+  if (options.readOnly && method !== 'GET') throw new ApiError(messages.readOnly, 405)
   let response: Response
   const json = body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+  const send = options.fetch ?? fetch
   try {
-    response = await fetch(`/orchestrator/api/${path}`, { method, ...json, headers: { 'x-orchestrator-request': '1', ...json.headers } })
+    response = await send(`${options.base ?? DEFAULT_API_BASE}${path}`, { method, ...json,
+      headers: { 'x-orchestrator-request': '1', ...json.headers } })
   } catch {
     throw new ApiError(messages.offline, 0, { unreachable: true })
   }
@@ -105,14 +117,14 @@ export const DECISION_KINDS: Readonly<Record<DecisionFilter, string>> = { work: 
 export type Call = <K extends keyof Api>(route: K, ...request: {} extends ApiRequest<K> ? [request?: ApiRequest<K>] : [request: ApiRequest<K>])
   => Promise<ApiResponse<K>>
 /** Build a typed route caller that resolves localized error messages on each request. */
-export function caller(messages: () => ApiMessages): Call {
+export function caller(messages: () => ApiMessages, options: ApiOptions = {}): Call {
   return (route, ...[request]) => {
     const [method, pattern] = route.split(' ') as [string, string]
     const values = (request ?? {}) as Record<string, unknown> & { query?: Record<string, unknown>; body?: unknown }
     const path = pattern.replace(/:(\w+)/g, (_match, name: string) => encodeURIComponent(String(values[name])))
     const query = Object.entries(values.query ?? {}).filter(([, value]) => value !== undefined && value !== '')
       .map(([name, value]) => `${name}=${encodeURIComponent(String(value))}`).join('&')
-    return api(messages(), query ? `${path}?${query}` : path, method, values.body)
+    return api(messages(), query ? `${path}?${query}` : path, method, values.body, options)
   }
 }
 
@@ -124,6 +136,7 @@ export type SourceView = SettingsView['sources'][number]
 export type SourceStatusRow = ApiResponse<'GET sources'>[number]
 export type TicketRow = ApiResponse<'GET tickets'>['items'][number]
 export type TicketPageView = ApiResponse<'GET tickets/:id'>
+export type WorkTimelineView = ApiResponse<'GET tickets/:id/timeline'>
 export type ThreadRow = ApiResponse<'GET threads'>['items'][number]
 export type ThreadPageView = ApiResponse<'GET threads/:key'>
 export type TriggerRow = ThreadPageView['timeline'][number]

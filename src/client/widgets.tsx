@@ -72,7 +72,13 @@ export function ClampText({ text }: { text: string }) {
   </>
 }
 
-export function ConfirmButton({ label, title, message, onConfirm, variant = 'ghost', icon }: {
+/** A button whose action changes the Host after a confirmation; a read-only panel shows none. */
+export function ConfirmButton(props: {
+  label: string; title: string; message: string; onConfirm: () => Promise<unknown>; variant?: 'ghost' | 'outline'; icon?: IconName
+}) {
+  return usePanel().readOnly ? null : <Confirm {...props} />
+}
+function Confirm({ label, title, message, onConfirm, variant = 'ghost', icon }: {
   label: string; title: string; message: string; onConfirm: () => Promise<unknown>; variant?: 'ghost' | 'outline'; icon?: IconName
 }) {
   const { t } = usePanel()
@@ -90,7 +96,9 @@ export function ConfirmButton({ label, title, message, onConfirm, variant = 'gho
 }
 export function SessionButton({ sessionId, label,
   variant = 'ghost' }: { sessionId: string; label?: string; variant?: 'ghost' | 'outline' }) {
-  const { t, openSession, notify } = usePanel()
+  const { t, openSession, notify, readOnly } = usePanel()
+  // A read-only page has no Session view to open it in; the ticket page shows how the Session spent its time instead.
+  if (readOnly) return null
   return <Button variant={variant} size="sm" icon={<Icon name="session" size={14} />}
     onClick={() => { openSession(sessionId).catch(error => notify(errorText(error))) }}>{label ?? t('openSession')}</Button>
 }
@@ -116,10 +124,10 @@ export function LoadMore({ onMore }: { onMore: () => void }) {
 }
 
 export function StatusHead({ hint, settings }: { hint: string; settings?: SettingsGroup }) {
-  const { t, navigate } = usePanel()
+  const { t, navigate, readOnly } = usePanel()
   return <div className="dt-status-head">
     <h2 className="dt-status-title">{t('statusTitle')}<InfoTip text={hint} /></h2>
-    {settings && <Button variant="ghost" size="sm" icon={<Icon name="settings" />}
+    {settings && !readOnly && <Button variant="ghost" size="sm" icon={<Icon name="settings" />}
       onClick={() => navigate(settingsRoute(settings))}>{t('tab.settings')}</Button>}
   </div>
 }
@@ -132,6 +140,9 @@ export function PageHead({ title, children }: { title: ReactNode; children?: Rea
 }
 /** Trigger a host setup re-check and restart, prompting for confirmation when running Assignments would be interrupted. */
 export function CheckSetupButton() {
+  return usePanel().readOnly ? null : <CheckSetup />
+}
+function CheckSetup() {
   const { t, call, notify, restart } = usePanel()
   const { running } = usePanelData()
   const check = async () => { await call('POST setup/check'); notify(t('setupChecking')); restart() }

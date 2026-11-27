@@ -90,6 +90,9 @@ export interface PanelServer {
   settings: Settings; revisions: Record<string, number>
   prompts: PromptsView
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
+  timelines: Record<string, ApiResponse<'GET tickets/:id/timeline'>>
+  /** The path the panel reaches the API under (`ApiOptions.base`). */
+  base: string
   threads: ThreadRow[]
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
@@ -221,6 +224,26 @@ const ticketDetail = (): TicketPageView => ({
     trigger: { id: 'e2', actor: actor('feishu', MEMBER), human: true, preview: '顺便改标题', thread: 'feishu:oc_1:om_root' } },
   { id: 'i2', kind: 'policy-changed', at: '2026-09-22T00:04:00Z', delivered: true, from: 'aaaaaaaaaaaaaaaa', to: 'bbbbbbbbbbbbbbbb' }],
 })
+/** One turn of three steps: a model call, a `bash` call moved to a background job that ran for two minutes, then the report. */
+export const workTimeline = (): ApiResponse<'GET tickets/:id/timeline'> => {
+  const at = Date.parse('2026-09-22T00:01:00Z')
+  return { sessionId: 'worker-t1', startedAt: at, lastAt: at + 160_000,
+    totals: { turns: 1, steps: 3, activeMs: 160_000, modelMs: 24_000, firstTokenMs: 6000, toolMs: 125_000, waitMs: 0, retryWaitMs: 2000,
+      failures: 1, compactionMs: 0, input: 60_000, cached: 54_000, output: 1200, reasoning: 400 },
+    tools: [{ name: 'bash', calls: 1, ms: 120_000, maxMs: 120_000, errors: 0 }, { name: 'orchestrator_report', calls: 1, ms: 5000,
+      maxMs: 5000, errors: 0 }],
+    turns: [{ turn: 1, start: at, end: at + 160_000, reason: 'completed', compactionMs: 0,
+      inputs: [{ kind: 'assignment', source: 'dsh-superagent', preview: '修复回归', at }],
+      steps: [
+        { turn: 1, step: 1, start: at, end: at + 128_000, failures: 1, retryWaitMs: 2000, retryReasons: ['rate limited'], text: '先跑一下测试。',
+          model: { start: at + 2000, firstToken: at + 5000, end: at + 8000, input: 20_000, cached: 18_000, output: 400 },
+          tools: [{ callId: 'c1', name: 'bash', start: at + 8000, end: at + 128_000, args: '{"command":"pnpm test"}', result: 'ok',
+            job: { label: 'pnpm test', settled: at + 128_000, status: 'completed' } }] },
+        { turn: 1, step: 2, start: at + 128_000, end: at + 160_000, failures: 0, retryWaitMs: 0, retryReasons: [],
+          model: { start: at + 128_000, firstToken: at + 131_000, end: at + 155_000, input: 40_000, cached: 36_000, output: 800 },
+          tools: [{ callId: 'c2', name: 'orchestrator_report', start: at + 155_000, end: at + 160_000, args: '{"state":"ready"}' }] },
+      ] }] }
+}
 function threadPage(key: string, { before, around }: { before?: string; around?: string }): ThreadPageView | undefined {
   if (key !== threadSummary().key) return undefined
   const base = { ...threadSummary(), tickets: [ticketSummary()], correlated: [{ key: 'github:42', title: 'PR 42' }], decisions: [],
@@ -256,7 +279,8 @@ function initial(): PanelServer {
       skillPrefix: SKILL_PREFIX, revision: 0, current: { ...defaults, config: defaultPrompts() },
       defaults: defaultPrompts(), parts: Object.entries(builtInParts()).map(([key, part]) => ({ key, ...part, base: builtInBase(part.text) })),
       defaultChanged: [], revisions: [{ ...defaults, changed: [] }], sessions: [], notificationPending: false, next_offset: null },
-    tickets: { open: [ticketSummary()], ended: [ended] }, ticketDetails: { t1: ticketDetail() },
+    tickets: { open: [ticketSummary()], ended: [ended] }, ticketDetails: { t1: ticketDetail() }, timelines: { t1: workTimeline() },
+    base: '/orchestrator/api/',
     threads: [threadSummary()], threadPages: threadPage,
     person: [ticketSummary({ attention: { id: 'q1', question: '需要确认按钮颜色' }, note: { text: '需要确认按钮颜色', error: false }, reply },
       { stage: 'person', action: 'answer' }),
@@ -327,6 +351,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET tickets': { query: ['state', 'offset', 'limit'], answer: ({ query }) => page(server.tickets[query.state === 'ended' ? 'ended'
     : 'open']) },
   'GET tickets/:id': { answer: ({ params }) => server.ticketDetails[params.id] ?? refuse(404, 'Ticket not found') },
+  'GET tickets/:id/timeline': { answer: ({ params }) => server.timelines[params.id] ?? refuse(404, 'Ticket not found') },
   'POST tickets/:id/retry': { answer: ({ params }) => {
     const ticket = ticketOf(params.id)
     if (!ticket) return refuse(404, 'Ticket not found')
@@ -436,7 +461,8 @@ export function usePanelServer(cleanup: () => void) {
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
       if (server.down) return new Response(null, { status: 404 })
       const address = new URL(url, 'http://127.0.0.1:3082')
-      const path = address.pathname.replace('/orchestrator/api/', '')
+      if (!address.pathname.startsWith(server.base)) return new Response(null, { status: 404 })
+      const path = address.pathname.slice(server.base.length)
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })
