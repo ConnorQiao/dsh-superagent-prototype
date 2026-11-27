@@ -352,14 +352,20 @@ export class Sessions {
   }
   /** Returns a tool registrar for `agent` that renders tool output as JSON text and attaches `output.image` as an image when present. */
   private registerTool(agent: Agent, binding: SessionBinding): RegisterTool {
-    return (name, description, schema, execute) => {
+    return (name, description, schema, execute, concludes) => {
       binding.disposers.push(agent.ctx.tools.register({ name, description, parameters: z.toJSONSchema(schema),
         output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => {
           const text = { type: 'text' as const, text: JSON.stringify(value) }
           const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
           return image ? [text, { type: 'image' as const, attachment: image }] : [text]
         } },
-        execute: (args, execution) => execute(schema.parse(args), execution.signal) }))
+        execute: async (args, execution) => {
+          const parsed = schema.parse(args)
+          const result = await execute(parsed, execution.signal)
+          // A DSH before 0.2.3 has no concluding results: there the model answers once more and the turn ends with that.
+          if (concludes?.(parsed)) execution.concludeTurn?.()
+          return result
+        } }))
     }
   }
   /** Returns `sessionId`'s active model-budget retry state (`{ model_retry }`) for status listings, or `{}` when not waiting on one. */
@@ -406,7 +412,7 @@ export class Sessions {
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
+    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute, tool.concludes)
     if (master) {
       const parent = scopeParentOf(agent)
       const main = host.scheduleTools === false ? MAIN_TOOLS.filter(name => !SCHEDULE_TOOLS.includes(name)) : MAIN_TOOLS

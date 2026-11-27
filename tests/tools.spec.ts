@@ -489,3 +489,14 @@ it('gives a worker the other messages of the request its ticket was accepted fro
   expect(page).toMatchObject({ batch: [{ trigger_id: other, read: `trigger/${other}` }] })
   expect(await h.runTool(`worker-${ticket.id}`, 'orchestrator_read', { resource: `trigger/${other}` })).toMatchObject({ trigger_id: other })
 })
+
+it('ends the worker\'s turn with a final report, so the model is not asked to say it again, and keeps it going after progress', async () => {
+  const { sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'Halfway.' })
+  expect(h.concluded).toEqual([])
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done.' })
+  expect(h.concluded).toEqual([`${sessionId}:orchestrator_report`])
+  // A report the Host refuses ends nothing.
+  await h.runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Done.', pr_number: 999 }).catch(() => undefined)
+  expect(h.concluded).toHaveLength(1)
+})
